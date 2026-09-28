@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import axios from 'axios'
+import SqlEditor from './SqlEditor.jsx'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
@@ -111,6 +112,7 @@ export default function App() {
   const [logs, setLogs]                   = useState([])
   const logsEndRef                        = useRef(null)
   const fileInputRef                      = useRef()
+  const editorRef                         = useRef(null)
 
   const addLog = useCallback((level, message) => {
     setLogs(prev => [...prev, { ts: ts(), level, message }])
@@ -214,11 +216,14 @@ export default function App() {
 
   // ── execute query ────────────────────────────────────────────────────────
   const handleExecute = async () => {
-    if (!query.trim()) { addLog('warn', 'Query is empty.'); return }
     if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return }
+
+    // Resolve which statement to run (selection > cursor statement > full text)
+    const toRun = editorRef.current?.getQueryToRun() ?? query.trim()
+    if (!toRun) { addLog('warn', 'Query is empty.'); return }
+
     setExecuting(true)
-    // stay on editor tab — results will show a loading state in the results tab
-    addLog('info', `Executing: ${query.trim().slice(0, 80)}${query.trim().length > 80 ? '…' : ''}`)
+    addLog('info', `Executing: ${toRun.slice(0, 80)}${toRun.length > 80 ? '…' : ''}`)
     try {
       const res = await api.post('/query', {
         API_KEY: config.API_KEY,
@@ -226,7 +231,7 @@ export default function App() {
         SCOPES: config.SCOPES,
         IMS_ORG: config.IMS_ORG,
         SANDBOX_NAME: selectedSandbox,
-        query: query.trim(),
+        query: toRun,
       })
       setResults(res.data)
       setActiveTab('results')  // switch AFTER we have results
@@ -453,15 +458,15 @@ export default function App() {
                     {executing ? 'Executing…' : 'Execute'}
                   </Btn>
                 </div>
-                {/* single scrollable textarea — no wrapper div to avoid double scrollbar */}
-                <textarea
-                  value={query}
-                  onChange={e => setQuery(e.target.value)}
-                  placeholder="SELECT * FROM your_dataset LIMIT 10;"
-                  spellCheck={false}
-                  className={`flex-1 w-full rounded-lg border border-[#2a2d3e] ${C.inputBg} px-4 py-3 text-sm ${C.bodyText} placeholder-[#3a3d52] resize-none overflow-auto focus:outline-none`}
-                  style={{ fontFamily: "'Courier New', Courier, monospace" }}
-                />
+                {/* CodeMirror SQL editor with syntax highlighting */}
+                <div className="flex-1 rounded-lg border border-[#2a2d3e] overflow-hidden">
+                  <SqlEditor
+                    ref={editorRef}
+                    value={query}
+                    onChange={setQuery}
+                    placeholder="SELECT * FROM your_dataset LIMIT 10;"
+                  />
+                </div>
                 {executing && (
                   <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400">
                     <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
