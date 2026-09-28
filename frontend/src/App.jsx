@@ -114,7 +114,6 @@ export default function App() {
         CLIENT_SECRET: config.CLIENT_SECRET,
         SCOPES: config.SCOPES,
         IMS_ORG: config.IMS_ORG,
-        TECHNICAL_ACCOUNT_ID: config.TECHNICAL_ACCOUNT_ID,
       })
       setSandboxes(res.data.sandboxes)
       setTenant(res.data.tenant || '')
@@ -139,7 +138,6 @@ export default function App() {
         SCOPES: config.SCOPES,
         IMS_ORG: config.IMS_ORG,
         SANDBOX_NAME: selectedSandbox,
-        TECHNICAL_ACCOUNT_ID: config.TECHNICAL_ACCOUNT_ID,
       })
       setConnStatus('connected')
       addLog('info', `Connected successfully. DB: ${res.data.dbName}, Host: ${res.data.host}`)
@@ -165,7 +163,6 @@ export default function App() {
         SCOPES: config.SCOPES,
         IMS_ORG: config.IMS_ORG,
         SANDBOX_NAME: selectedSandbox,
-        TECHNICAL_ACCOUNT_ID: config.TECHNICAL_ACCOUNT_ID,
         query: query.trim(),
       })
       setResults(res.data)
