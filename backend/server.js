@@ -211,6 +211,69 @@ app.post('/api/query', async (req, res) => {
   }
 })
 
+/**
+ * POST /api/connect/direct
+ * Body: { host, port, dbName, user, password }
+ * Verifies a direct Postgres connection without any AEP API calls.
+ * Returns: { host, port, dbName, user }
+ */
+app.post('/api/connect/direct', async (req, res) => {
+  const { host, port, dbName, user, password } = req.body
+  if (!host || !dbName || !user) {
+    return res.status(400).json({ error: 'host, dbName and user are required.' })
+  }
+  try {
+    const client = new Client({
+      host,
+      port: parseInt(port, 10) || 5432,
+      database: dbName,
+      user,
+      password: password || '',
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 15000,
+    })
+    await client.connect()
+    await client.end()
+    res.json({ host, port, dbName, user })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+/**
+ * POST /api/query/direct
+ * Body: { host, port, dbName, user, password, query }
+ * Executes a query using raw Postgres credentials — no AEP API calls.
+ * Returns: { columns, rows, duration }
+ */
+app.post('/api/query/direct', async (req, res) => {
+  const { host, port, dbName, user, password, query } = req.body
+  if (!query || !query.trim()) {
+    return res.status(400).json({ error: 'Query cannot be empty.' })
+  }
+  try {
+    const client = new Client({
+      host,
+      port: parseInt(port, 10) || 5432,
+      database: dbName,
+      user,
+      password: password || '',
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 15000,
+    })
+    const t0 = Date.now()
+    await client.connect()
+    const result = await client.query(query)
+    const duration = Date.now() - t0
+    await client.end()
+
+    const columns = result.fields.map(f => f.name)
+    res.json({ columns, rows: result.rows, duration })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ─── start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => {

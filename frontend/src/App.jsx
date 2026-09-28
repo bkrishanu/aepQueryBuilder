@@ -95,11 +95,24 @@ function StatusPill({ status }) {
 
 // ─── main app ─────────────────────────────────────────────────────────────────
 export default function App() {
+  // ── connection mode ─────────────────────────────────────────────────────
+  // 'aep' = use AEP API + sandbox flow  |  'direct' = manual DB credentials
+  const [connMode, setConnMode]           = useState('aep')
+
+  // AEP mode state
   const [config, setConfig]               = useState(null)
   const [org, setOrg]                     = useState('')
   const [tenant, setTenant]               = useState('')
   const [sandboxes, setSandboxes]         = useState([])
   const [selectedSandbox, setSelectedSandbox] = useState('')
+
+  // Direct mode state
+  const [directHost, setDirectHost]       = useState('')
+  const [directPort, setDirectPort]       = useState('5432')
+  const [directDb, setDirectDb]           = useState('')
+  const [directUser, setDirectUser]       = useState('')
+  const [directPwd, setDirectPwd]         = useState('')
+
   const [connStatus, setConnStatus]       = useState('idle')
 
   const [activeTab, setActiveTab]         = useState('editor')
@@ -123,7 +136,7 @@ export default function App() {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [logs])
 
-  // Restore config from sessionStorage on mount
+  // Restore state from sessionStorage on mount
   useEffect(() => {
     const stored = sessionStorage.getItem('aep_config')
     if (stored) {
@@ -131,6 +144,17 @@ export default function App() {
         const parsed = JSON.parse(stored)
         setConfig(parsed)
         setOrg(parsed.IMS_ORG || '')
+      } catch { /* ignore */ }
+    }
+    const storedDirect = sessionStorage.getItem('direct_conn')
+    if (storedDirect) {
+      try {
+        const d = JSON.parse(storedDirect)
+        setDirectHost(d.host || '')
+        setDirectPort(d.port || '5432')
+        setDirectDb(d.dbName || '')
+        setDirectUser(d.user || '')
+        // password is intentionally NOT restored from storage
       } catch { /* ignore */ }
     }
   }, [])
@@ -185,9 +209,33 @@ export default function App() {
 
   // ── connect ──────────────────────────────────────────────────────────────
   const handleConnect = async () => {
-    if (!config || !selectedSandbox) return
     setConnecting(true)
     setConnStatus('connecting')
+
+    if (connMode === 'direct') {
+      addLog('info', `Connecting directly to ${directHost}:${directPort}/${directDb}…`)
+      // persist non-sensitive direct fields
+      sessionStorage.setItem('direct_conn', JSON.stringify({
+        host: directHost, port: directPort, dbName: directDb, user: directUser,
+      }))
+      try {
+        const res = await api.post('/connect/direct', {
+          host: directHost, port: directPort, dbName: directDb,
+          user: directUser, password: directPwd,
+        })
+        setConnStatus('connected')
+        addLog('info', `Connected. Host: ${res.data.host} · DB: ${res.data.dbName}`)
+      } catch (err) {
+        setConnStatus('error')
+        addLog('error', `Connection failed: ${err.response?.data?.error || err.message}`)
+      } finally {
+        setConnecting(false)
+      }
+      return
+    }
+
+    // AEP mode
+    if (!config || !selectedSandbox) { setConnecting(false); setConnStatus('idle'); return }
     addLog('info', `Connecting to sandbox "${selectedSandbox}"…`)
     try {
       const res = await api.post('/connect', {
@@ -211,7 +259,10 @@ export default function App() {
   const handleDisconnect = () => {
     setConnStatus('idle')
     setResults(null)
-    addLog('info', `Disconnected from sandbox "${selectedSandbox}".`)
+    const label = connMode === 'direct'
+      ? `${directHost}/${directDb}`
+      : `sandbox "${selectedSandbox}"`
+    addLog('info', `Disconnected from ${label}.`)
   }
 
   // ── execute query ────────────────────────────────────────────────────────
@@ -225,14 +276,11 @@ export default function App() {
     setExecuting(true)
     addLog('info', `Executing: ${toRun.slice(0, 80)}${toRun.length > 80 ? '…' : ''}`)
     try {
-      const res = await api.post('/query', {
-        API_KEY: config.API_KEY,
-        CLIENT_SECRET: config.CLIENT_SECRET,
-        SCOPES: config.SCOPES,
-        IMS_ORG: config.IMS_ORG,
-        SANDBOX_NAME: selectedSandbox,
-        query: toRun,
-      })
+      const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
+      const payload = connMode === 'direct'
+        ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd, query: toRun }
+        : { API_KEY: config.API_KEY, CLIENT_SECRET: config.CLIENT_SECRET, SCOPES: config.SCOPES, IMS_ORG: config.IMS_ORG, SANDBOX_NAME: selectedSandbox, query: toRun }
+      const res = await api.post(endpoint, payload)
       setResults(res.data)
       setActiveTab('results')  // switch AFTER we have results
       addLog('info', `Query returned ${res.data.rows.length} row(s) in ${res.data.duration}ms.`)
@@ -279,132 +327,227 @@ export default function App() {
 
         {/* ── CONFIGURATION CARD ── */}
         <div className={`${C.cardBg} rounded-xl border ${C.cardBorder} p-5`}>
-          <p className={`text-[11px] font-semibold uppercase tracking-widest ${C.mutedText} mb-4`}>Configuration</p>
 
-          {/* Row 1: Config File | Organization | Tenant | Load Sandboxes button */}
-          {/* items-start so all cells are top-aligned; each cell has Label + control at fixed height */}
-          <div className="grid grid-cols-12 gap-3 items-start">
-
-            {/* Config File — 3 cols */}
-            <div className="col-span-12 sm:col-span-3">
-              <Label>Config File</Label>
-              <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-              <Btn
-                variant="ghost"
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full"
-              >
-                <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M12 12V4m0 0L8 8m4-4l4 4" />
-                </svg>
-                {config ? 'Re-upload Config' : 'Upload Config JSON'}
-              </Btn>
-              {/* Fixed-height hint row so it never shifts sibling columns */}
-              <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
-                {config ? (
-                  <span className="text-emerald-400 flex items-center gap-1">
-                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                    </svg>
-                    Config loaded
-                  </span>
-                ) : null}
-              </p>
-            </div>
-
-            {/* Organization — 4 cols */}
-            <div className="col-span-12 sm:col-span-4">
-              <Label>Organization (IMS_ORG)</Label>
-              <ReadonlyField value={org} placeholder="Upload config to populate" />
-              {/* matching spacer so all columns share the same total height */}
-              <div className="h-5 mt-1.5" />
-            </div>
-
-            {/* Tenant — 3 cols */}
-            <div className="col-span-12 sm:col-span-3">
-              <Label>Tenant</Label>
-              <ReadonlyField value={tenant} placeholder="Load sandboxes to populate" />
-              <div className="h-5 mt-1.5" />
-            </div>
-
-            {/* Load Sandboxes button — 2 cols */}
-            <div className="col-span-12 sm:col-span-2">
-              <Label>&#8203;</Label>{/* zero-width space keeps label height identical */}
-              <Btn
-                variant="primary"
-                onClick={handleLoadSandboxes}
-                disabled={!config}
-                loading={loadingSandboxes}
-                className="w-full"
-              >
-                {!loadingSandboxes && (
-                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <rect x="2" y="3" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                    <rect x="2" y="10" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                    <rect x="2" y="17" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-                {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
-              </Btn>
-              <div className="h-5 mt-1.5" />
-            </div>
-          </div>
-
-          {/* Divider */}
-          <div className={`border-t ${C.divider} my-4`} />
-
-          {/* Row 2: Sandbox dropdown | Connect / Disconnect */}
-          <div className="grid grid-cols-12 gap-3 items-end">
-
-            {/* Sandbox — 10 cols */}
-            <div className="col-span-12 sm:col-span-10">
-              <Label>Sandbox</Label>
-              <select
-                value={selectedSandbox}
-                onChange={e => {
-                  setSelectedSandbox(e.target.value)
-                  if (connStatus === 'connected') {
-                    setConnStatus('idle')
-                    addLog('info', 'Sandbox changed — disconnected.')
-                  }
-                }}
-                disabled={sandboxes.length === 0 || connStatus === 'connected'}
-                className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed appearance-none`}
-              >
-                <option value="">— Select a Sandbox —</option>
-                {sandboxes.map(s => (
-                  <option key={s.name} value={s.name}>{s.title}</option>
-                ))}
-              </select>
-            </div>
-
-            {/* Connect / Disconnect — 2 cols */}
-            <div className="col-span-12 sm:col-span-2">
-              {connStatus === 'connected' ? (
-                <Btn variant="danger" onClick={handleDisconnect} className="w-full">
-                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                  Disconnect
-                </Btn>
-              ) : (
-                <Btn
-                  variant="success"
-                  onClick={handleConnect}
-                  disabled={!selectedSandbox}
-                  loading={connecting}
-                  className="w-full"
+          {/* Card header + mode toggle */}
+          <div className="flex items-center justify-between mb-4">
+            <p className={`text-[11px] font-semibold uppercase tracking-widest ${C.mutedText}`}>Configuration</p>
+            {/* Mode toggle pill */}
+            <div className={`flex rounded-lg border ${C.cardBorder} p-0.5 gap-0.5`}>
+              {[
+                { id: 'aep',    label: 'AEP API' },
+                { id: 'direct', label: 'Direct Connection' },
+              ].map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => { if (connStatus !== 'connected') { setConnMode(id); setConnStatus('idle') } }}
+                  disabled={connStatus === 'connected'}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:cursor-not-allowed ${
+                    connMode === id
+                      ? 'bg-[#2563eb] text-white'
+                      : `${C.mutedText} hover:text-[#c9ccd8]`
+                  }`}
                 >
-                  {!connecting && (
-                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                  )}
-                  {connecting ? 'Connecting…' : 'Connect'}
-                </Btn>
-              )}
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
+
+          {/* ── AEP API mode ── */}
+          {connMode === 'aep' && (
+            <>
+              <div className="grid grid-cols-12 gap-3 items-start">
+                {/* Config File — 3 cols */}
+                <div className="col-span-12 sm:col-span-3">
+                  <Label>Config File</Label>
+                  <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+                  <Btn variant="ghost" onClick={() => fileInputRef.current?.click()} className="w-full">
+                    <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M12 12V4m0 0L8 8m4-4l4 4" />
+                    </svg>
+                    {config ? 'Re-upload Config' : 'Upload Config JSON'}
+                  </Btn>
+                  <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
+                    {config && (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                        Config loaded
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                {/* Organization — 4 cols */}
+                <div className="col-span-12 sm:col-span-4">
+                  <Label>Organization (IMS_ORG)</Label>
+                  <ReadonlyField value={org} placeholder="Upload config to populate" />
+                  <div className="h-5 mt-1.5" />
+                </div>
+
+                {/* Tenant — 3 cols */}
+                <div className="col-span-12 sm:col-span-3">
+                  <Label>Tenant</Label>
+                  <ReadonlyField value={tenant} placeholder="Load sandboxes to populate" />
+                  <div className="h-5 mt-1.5" />
+                </div>
+
+                {/* Load Sandboxes — 2 cols */}
+                <div className="col-span-12 sm:col-span-2">
+                  <Label>&#8203;</Label>
+                  <Btn variant="primary" onClick={handleLoadSandboxes} disabled={!config} loading={loadingSandboxes} className="w-full">
+                    {!loadingSandboxes && (
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <rect x="2" y="3" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
+                        <rect x="2" y="10" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
+                        <rect x="2" y="17" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                    {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
+                  </Btn>
+                  <div className="h-5 mt-1.5" />
+                </div>
+              </div>
+
+              <div className={`border-t ${C.divider} my-4`} />
+
+              {/* Sandbox + Connect row */}
+              <div className="grid grid-cols-12 gap-3 items-end">
+                <div className="col-span-12 sm:col-span-10">
+                  <Label>Sandbox</Label>
+                  <select
+                    value={selectedSandbox}
+                    onChange={e => {
+                      setSelectedSandbox(e.target.value)
+                      if (connStatus === 'connected') { setConnStatus('idle'); addLog('info', 'Sandbox changed — disconnected.') }
+                    }}
+                    disabled={sandboxes.length === 0 || connStatus === 'connected'}
+                    className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed appearance-none`}
+                  >
+                    <option value="">— Select a Sandbox —</option>
+                    {sandboxes.map(s => <option key={s.name} value={s.name}>{s.title}</option>)}
+                  </select>
+                </div>
+                <div className="col-span-12 sm:col-span-2">
+                  {connStatus === 'connected' ? (
+                    <Btn variant="danger" onClick={handleDisconnect} className="w-full">
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                      Disconnect
+                    </Btn>
+                  ) : (
+                    <Btn variant="success" onClick={handleConnect} disabled={!selectedSandbox} loading={connecting} className="w-full">
+                      {!connecting && (
+                        <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                      )}
+                      {connecting ? 'Connecting…' : 'Connect'}
+                    </Btn>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* ── Direct Connection mode ── */}
+          {connMode === 'direct' && (
+            <div className="grid grid-cols-12 gap-3 items-end">
+              {/* Host — 4 cols */}
+              <div className="col-span-12 sm:col-span-4">
+                <Label>Host</Label>
+                <input
+                  type="text"
+                  value={directHost}
+                  onChange={e => setDirectHost(e.target.value)}
+                  placeholder="e.g. foo.platform-query.adobe.io"
+                  disabled={connStatus === 'connected'}
+                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                />
+              </div>
+
+              {/* Port — 1 col */}
+              <div className="col-span-6 sm:col-span-1">
+                <Label>Port</Label>
+                <input
+                  type="text"
+                  value={directPort}
+                  onChange={e => setDirectPort(e.target.value)}
+                  placeholder="5432"
+                  disabled={connStatus === 'connected'}
+                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                />
+              </div>
+
+              {/* DB Name — 2 cols */}
+              <div className="col-span-6 sm:col-span-2">
+                <Label>Database</Label>
+                <input
+                  type="text"
+                  value={directDb}
+                  onChange={e => setDirectDb(e.target.value)}
+                  placeholder="dbname"
+                  disabled={connStatus === 'connected'}
+                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                />
+              </div>
+
+              {/* User — 2 cols */}
+              <div className="col-span-6 sm:col-span-2">
+                <Label>User</Label>
+                <input
+                  type="text"
+                  value={directUser}
+                  onChange={e => setDirectUser(e.target.value)}
+                  placeholder="username"
+                  disabled={connStatus === 'connected'}
+                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                />
+              </div>
+
+              {/* Password — 1 col */}
+              <div className="col-span-6 sm:col-span-1">
+                <Label>Password</Label>
+                <input
+                  type="password"
+                  value={directPwd}
+                  onChange={e => setDirectPwd(e.target.value)}
+                  placeholder="••••••"
+                  disabled={connStatus === 'connected'}
+                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                />
+              </div>
+
+              {/* Connect / Disconnect — 2 cols */}
+              <div className="col-span-12 sm:col-span-2">
+                {connStatus === 'connected' ? (
+                  <Btn variant="danger" onClick={handleDisconnect} className="w-full">
+                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    Disconnect
+                  </Btn>
+                ) : (
+                  <Btn
+                    variant="success"
+                    onClick={handleConnect}
+                    disabled={!directHost || !directDb || !directUser}
+                    loading={connecting}
+                    className="w-full"
+                  >
+                    {!connecting && (
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      </svg>
+                    )}
+                    {connecting ? 'Connecting…' : 'Connect'}
+                  </Btn>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── TABS + PANELS ── */}
