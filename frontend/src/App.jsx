@@ -520,24 +520,28 @@ export default function App() {
                   </div>
                 )}
 
-                {/* data table: fixed viewport, both scrollbars, 5-col × 50-row default view */}
-                {!executing && results && results.rows.length > 0 && (
-                  <div
-                    className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]"
-                    style={{
-                      // show ~5 columns (each ~160px) and ~50 rows (each ~34px) before scrolling
-                      maxWidth: '100%',
-                      maxHeight: '100%',
-                    }}
-                  >
-                    <table className="border-collapse text-sm" style={{ minWidth: `${Math.max(results.columns.length, 5) * 160}px` }}>
+                {/* data table */}
+                {!executing && results && results.rows.length > 0 && (() => {
+                  const colCount = results.columns.length
+                  // ≤5 cols → fill width evenly; ≥6 cols → fixed min-width per col, horizontal scroll
+                  const wideMode = colCount > 5
+                  const colWidth = wideMode ? 200 : undefined   // px per col when scrolling
+                  const tableStyle = wideMode
+                    ? { minWidth: `${colCount * colWidth}px` }
+                    : { width: '100%', tableLayout: 'fixed' }
+                  const cellStyle = wideMode
+                    ? { width: `${colWidth}px`, minWidth: `${colWidth}px` }
+                    : { width: `${100 / colCount}%` }
+                  return (
+                  <div className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]">
+                    <table className="border-collapse text-sm" style={tableStyle}>
                       <thead className="sticky top-0 z-10">
                         <tr className="bg-[#12141c]">
                           {results.columns.map(col => (
                             <th
                               key={col}
-                              className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-[#8b8fa8] border-b border-[#2a2d3e] border-r border-r-[#1e2030] whitespace-nowrap"
-                              style={{ minWidth: '160px', maxWidth: '280px' }}
+                              className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-[#8b8fa8] border-b border-[#2a2d3e] border-r border-r-[#1e2030] whitespace-nowrap overflow-hidden text-ellipsis"
+                              style={cellStyle}
                             >
                               {col}
                             </th>
@@ -556,8 +560,8 @@ export default function App() {
                             {results.columns.map(col => (
                               <td
                                 key={col}
-                                className="px-4 py-2 text-[#c9ccd8] border-r border-r-[#1e2030] whitespace-nowrap"
-                                style={{ maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                                className="px-4 py-2 text-[#c9ccd8] border-r border-r-[#1e2030] whitespace-nowrap overflow-hidden text-ellipsis"
+                                style={cellStyle}
                               >
                                 {row[col] === null || row[col] === undefined ? (
                                   <span className="text-[#3a3d52] italic">null</span>
@@ -569,7 +573,8 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                )}
+                  )
+                })()}
               </div>
             )}
           </div>
