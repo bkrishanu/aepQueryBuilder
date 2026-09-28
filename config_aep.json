@@ -1,8 +1,0 @@
-{
-	"CLIENT_SECRET": "p8e-XNu4toz8DdE8ZcD8-mPq3haZZMcgRMWI",
-	"API_KEY": "f953de0f39ad4ebd963391b73dc9fd40",
-	"SCOPES": "AdobeID, openid, read_organizations, additional_info.projectedProductContext, additional_info.roles, adobeio_api, read_client_secret, manage_client_secrets, campaign_sdk, campaign_config_server_general, deliverability_service_general, session, user_management_sdk",
-	"IMS_ORG": "91D55B255640B3AE7F000101@AdobeOrg",
-	"TECHNICAL_ACCOUNT_ID": "4D9D82E86A0970F40A495EBB@techacct.adobe.com",
-	"CONTAINER_ID": "tenant"
-}

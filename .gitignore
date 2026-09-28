@@ -17,3 +17,7 @@ frontend/.vite/
 Thumbs.db
 .vscode/
 *.log
+
+# local credential files
+config_aep.json
+*.config.json

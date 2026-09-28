@@ -267,21 +267,42 @@ All endpoints return `{ error: "..." }` with HTTP 4xx/5xx on failure.
 
 ## Deploying to Vercel
 
-### Option A — Separate deployments (recommended)
+The project is pre-configured for a **single Vercel deployment** — the React frontend and all API routes deploy together from the repository root.
 
-| Part | Folder | Platform |
-|------|--------|----------|
-| Frontend | `frontend/` | Vercel (static site) |
-| Backend | `backend/` | Railway / Render / Vercel Functions |
+### How it works
 
-After deploying the backend, set the `VITE_API_BASE_URL` environment variable in your Vercel frontend project to the deployed backend URL, and update the `baseURL` in both `frontend/src/App.jsx` and `frontend/src/QueryPane.jsx`.
+| Part | How it runs on Vercel |
+|------|-----------------------|
+| Frontend (`frontend/`) | Built with `vite build`, served as a static site from `frontend/dist/` |
+| Backend (`api/*.js`) | Vercel Serverless Functions — auto-discovered from the `api/` directory |
 
-### Option B — Monorepo on Vercel
+All `/api/*` requests are routed to the matching serverless function. Everything else (`/*`) is served by the React SPA. No separate backend service is needed.
 
-1. Install the [Vercel CLI](https://vercel.com/docs/cli): `npm i -g vercel`
-2. From the project root: `vercel`
-3. Set **Root Directory** to `frontend`.
-4. Deploy the backend as a separate Vercel project pointing to `backend/`, or convert `server.js` routes to `api/*.js` serverless functions.
+### Steps
+
+1. **Push to GitHub** — ensure the repository is up to date:
+   ```bash
+   git push
+   ```
+
+2. **Import the project in Vercel:**
+   - Go to [vercel.com/new](https://vercel.com/new)
+   - Click **Add New → Project** and import `bkrishanu/aepQueryBuilder`
+   - Vercel will auto-detect the `vercel.json` at the root
+
+3. **No environment variables are required** — all credentials are supplied at runtime by uploading your config JSON in the UI.
+
+4. **Deploy** — click **Deploy**. Vercel will:
+   - Run `npm install` at the root (installs `axios` and `pg` for the serverless functions)
+   - Run `cd frontend && npm install && npm run build`
+   - Serve `frontend/dist/` as the static frontend
+   - Expose `api/*.js` as serverless functions at `/api/*`
+
+5. Once deployed, open the Vercel URL and use the tool exactly as in local development.
+
+### Re-deploying after changes
+
+Every push to `master` triggers an automatic redeploy on Vercel if you enable **Git Integration** in the Vercel project settings.
 
 ---
 
