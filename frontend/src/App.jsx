@@ -314,7 +314,7 @@ export default function App() {
             </svg>
           </div>
           <div>
-            <h1 className={`text-sm font-semibold ${C.headingText} leading-tight`}>AEP Query Connector</h1>
+            <h1 className={`text-sm font-semibold ${C.headingText} leading-tight`}>AEP Query Editor</h1>
             <p className={`text-[11px] ${C.mutedText}`}>Adobe Experience Platform · Query Service</p>
           </div>
         </div>
@@ -661,7 +661,7 @@ export default function App() {
 
       {/* ── FOOTER ── */}
       <footer className={`text-center text-[11px] ${C.mutedText} py-3 border-t ${C.divider} ${C.cardBg}`}>
-        AEP Query Connector · Adobe Experience Platform Query Service
+        AEP Query Editor · Adobe Experience Platform Query Service
       </footer>
     </div>
   )
