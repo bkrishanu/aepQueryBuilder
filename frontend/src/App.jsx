@@ -1,13 +1,44 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import axios from 'axios'
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
 const api = axios.create({ baseURL: '/api' })
 
-// ─── small UI primitives ─────────────────────────────────────────────────────
+// ─── design tokens (single source of truth) ──────────────────────────────────
+// Palette: deep navy bg, cool-grey surface, slate text, teal accent
+const C = {
+  pageBg:       'bg-[#0f1117]',
+  cardBg:       'bg-[#1a1d27]',
+  cardBorder:   'border-[#2a2d3e]',
+  inputBg:      'bg-[#12141c]',
+  inputBorder:  'border-[#2a2d3e]',
+  labelText:    'text-[#8b8fa8]',
+  bodyText:     'text-[#c9ccd8]',
+  headingText:  'text-[#e8eaf0]',
+  mutedText:    'text-[#555870]',
+  accentBg:     'bg-[#2563eb]',
+  accentHover:  'hover:bg-[#1d4ed8]',
+  accentText:   'text-[#2563eb]',
+  successBg:    'bg-[#059669]',
+  successHover: 'hover:bg-[#047857]',
+  dangerBg:     'bg-[#dc2626]',
+  dangerHover:  'hover:bg-[#b91c1c]',
+  divider:      'border-[#2a2d3e]',
+  tabActiveBg:  'bg-[#22253a]',
+  tabActiveText:'text-[#e8eaf0]',
+  tabInactiveText: 'text-[#555870]',
+  consoleBg:    'bg-[#0b0d14]',
+  consoleBorder:'border-[#1e2030]',
+}
+
+// ─── small primitives ─────────────────────────────────────────────────────────
 function Label({ children }) {
-  return <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">{children}</label>
+  return (
+    <label className={`block text-[11px] font-semibold uppercase tracking-widest mb-1.5 ${C.labelText}`}>
+      {children}
+    </label>
+  )
 }
 
 function ReadonlyField({ value, placeholder }) {
@@ -16,65 +47,98 @@ function ReadonlyField({ value, placeholder }) {
       readOnly
       value={value}
       placeholder={placeholder}
-      className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:outline-none"
+      className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none font-mono`}
     />
   )
 }
 
-function StatusDot({ status }) {
-  // status: 'idle' | 'connecting' | 'connected' | 'error'
-  const map = {
-    idle: 'bg-slate-300',
-    connecting: 'bg-amber-400 animate-pulse',
-    connected: 'bg-emerald-500',
-    error: 'bg-red-500',
-  }
-  const label = {
-    idle: 'Not connected',
-    connecting: 'Connecting…',
-    connected: 'Connected',
-    error: 'Connection failed',
+function Btn({ onClick, disabled, variant = 'primary', loading = false, children, className = '' }) {
+  const variants = {
+    primary:     `${C.accentBg} ${C.accentHover} text-white`,
+    success:     `${C.successBg} ${C.successHover} text-white`,
+    danger:      `${C.dangerBg} ${C.dangerHover} text-white`,
+    ghost:       `bg-transparent border ${C.inputBorder} ${C.bodyText} hover:bg-[#22253a]`,
   }
   return (
-    <span className="flex items-center gap-2 text-sm text-slate-600">
-      <span className={`inline-block w-2.5 h-2.5 rounded-full ${map[status]}`} />
-      {label[status]}
+    <button
+      onClick={onClick}
+      disabled={disabled || loading}
+      className={`flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+    >
+      {loading && (
+        <svg className="w-3.5 h-3.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+        </svg>
+      )}
+      {children}
+    </button>
+  )
+}
+
+function StatusPill({ status }) {
+  const cfg = {
+    idle:       { dot: 'bg-[#3a3d52]',                           label: 'Not connected' },
+    connecting: { dot: 'bg-amber-400 animate-pulse',              label: 'Connecting…'   },
+    connected:  { dot: 'bg-emerald-400',                          label: 'Connected'      },
+    error:      { dot: 'bg-red-500',                              label: 'Failed'         },
+  }
+  const { dot, label } = cfg[status] || cfg.idle
+  return (
+    <span className={`inline-flex items-center gap-2 rounded-full border ${C.inputBorder} ${C.inputBg} px-3 py-1 text-xs font-medium ${C.bodyText}`}>
+      <span className={`w-2 h-2 rounded-full ${dot}`} />
+      {label}
     </span>
   )
 }
 
-// ─── main app ────────────────────────────────────────────────────────────────
+// ─── main app ─────────────────────────────────────────────────────────────────
 export default function App() {
-  // config
-  const [config, setConfig] = useState(null)
-  const fileInputRef = useRef()
-
-  // fields
-  const [org, setOrg] = useState('')
-  const [tenant, setTenant] = useState('')
-  const [sandboxes, setSandboxes] = useState([])
+  const [config, setConfig]               = useState(null)
+  const [org, setOrg]                     = useState('')
+  const [tenant, setTenant]               = useState('')
+  const [sandboxes, setSandboxes]         = useState([])
   const [selectedSandbox, setSelectedSandbox] = useState('')
-  const [connStatus, setConnStatus] = useState('idle') // idle | connecting | connected | error
+  const [connStatus, setConnStatus]       = useState('idle')
 
-  // query
-  const [activeTab, setActiveTab] = useState('editor') // editor | results
-  const [query, setQuery] = useState('')
-  const [results, setResults] = useState(null) // { columns, rows } | null
-  const [executing, setExecuting] = useState(false)
+  const [activeTab, setActiveTab]         = useState('editor')
+  const [query, setQuery]                 = useState('')
+  const [results, setResults]             = useState(null)
+  const [executing, setExecuting]         = useState(false)
   const [loadingSandboxes, setLoadingSandboxes] = useState(false)
-  const [connecting, setConnecting] = useState(false)
+  const [connecting, setConnecting]       = useState(false)
 
-  // logs
-  const [logs, setLogs] = useState([])
+  const [logs, setLogs]                   = useState([])
+  const logsEndRef                        = useRef(null)
+  const fileInputRef                      = useRef()
 
   const addLog = useCallback((level, message) => {
     setLogs(prev => [...prev, { ts: ts(), level, message }])
   }, [])
 
-  // ── config file upload ───────────────────────────────────────────────────
+  // Auto-scroll console to bottom on new log
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [logs])
+
+  // Restore config from sessionStorage on mount
+  useEffect(() => {
+    const stored = sessionStorage.getItem('aep_config')
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored)
+        setConfig(parsed)
+        setOrg(parsed.IMS_ORG || '')
+      } catch { /* ignore */ }
+    }
+  }, [])
+
+  // ── config upload ────────────────────────────────────────────────────────
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    // reset input so same file can be re-uploaded
+    e.target.value = ''
     const reader = new FileReader()
     reader.onload = (ev) => {
       try {
@@ -82,32 +146,24 @@ export default function App() {
         sessionStorage.setItem('aep_config', JSON.stringify(parsed))
         setConfig(parsed)
         setOrg(parsed.IMS_ORG || '')
-        addLog('info', `Config file loaded: ${file.name}`)
+        // reset downstream state on new config
+        setTenant('')
+        setSandboxes([])
+        setSelectedSandbox('')
+        setConnStatus('idle')
+        addLog('info', `Config loaded: ${file.name}`)
       } catch {
-        addLog('error', 'Failed to parse config JSON file.')
+        addLog('error', 'Failed to parse config — ensure the file is valid JSON.')
       }
     }
     reader.readAsText(file)
   }
 
-  // on mount — restore config from session storage
-  const loadFromSession = () => {
-    const stored = sessionStorage.getItem('aep_config')
-    if (stored && !config) {
-      try {
-        const parsed = JSON.parse(stored)
-        setConfig(parsed)
-        setOrg(parsed.IMS_ORG || '')
-      } catch { /* ignore */ }
-    }
-  }
-  if (!config) loadFromSession()
-
   // ── load sandboxes ───────────────────────────────────────────────────────
   const handleLoadSandboxes = async () => {
     if (!config) { addLog('error', 'Upload a config file first.'); return }
     setLoadingSandboxes(true)
-    addLog('info', 'Loading sandboxes…')
+    addLog('info', 'Fetching sandboxes…')
     try {
       const res = await api.post('/sandboxes', {
         API_KEY: config.API_KEY,
@@ -117,9 +173,9 @@ export default function App() {
       })
       setSandboxes(res.data.sandboxes)
       setTenant(res.data.tenant || '')
-      addLog('info', `Loaded ${res.data.sandboxes.length} sandbox(es). Tenant: ${res.data.tenant}`)
+      addLog('info', `${res.data.sandboxes.length} sandbox(es) loaded. Tenant: ${res.data.tenant}`)
     } catch (err) {
-      addLog('error', `Failed to load sandboxes: ${err.response?.data?.error || err.message}`)
+      addLog('error', `Load sandboxes failed: ${err.response?.data?.error || err.message}`)
     } finally {
       setLoadingSandboxes(false)
     }
@@ -140,7 +196,7 @@ export default function App() {
         SANDBOX_NAME: selectedSandbox,
       })
       setConnStatus('connected')
-      addLog('info', `Connected successfully. DB: ${res.data.dbName}, Host: ${res.data.host}`)
+      addLog('info', `Connected. Host: ${res.data.host} · DB: ${res.data.dbName}`)
     } catch (err) {
       setConnStatus('error')
       addLog('error', `Connection failed: ${err.response?.data?.error || err.message}`)
@@ -149,13 +205,20 @@ export default function App() {
     }
   }
 
+  // ── disconnect ───────────────────────────────────────────────────────────
+  const handleDisconnect = () => {
+    setConnStatus('idle')
+    setResults(null)
+    addLog('info', `Disconnected from sandbox "${selectedSandbox}".`)
+  }
+
   // ── execute query ────────────────────────────────────────────────────────
   const handleExecute = async () => {
     if (!query.trim()) { addLog('warn', 'Query is empty.'); return }
     if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return }
     setExecuting(true)
-    setActiveTab('results')
-    addLog('info', `Executing query: ${query.trim().slice(0, 80)}${query.length > 80 ? '…' : ''}`)
+    // stay on editor tab — results will show a loading state in the results tab
+    addLog('info', `Executing: ${query.trim().slice(0, 80)}${query.trim().length > 80 ? '…' : ''}`)
     try {
       const res = await api.post('/query', {
         API_KEY: config.API_KEY,
@@ -166,6 +229,7 @@ export default function App() {
         query: query.trim(),
       })
       setResults(res.data)
+      setActiveTab('results')  // switch AFTER we have results
       addLog('info', `Query returned ${res.data.rows.length} row(s) in ${res.data.duration}ms.`)
     } catch (err) {
       setResults(null)
@@ -186,92 +250,110 @@ export default function App() {
     addLog('info', 'Results copied to clipboard (tab-delimited).')
   }
 
+  // ── render ───────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col">
-      {/* ── header ── */}
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm">
+    <div className={`min-h-screen ${C.pageBg} flex flex-col`} style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+
+      {/* ── HEADER ── */}
+      <header className={`${C.cardBg} border-b ${C.divider} px-6 py-3 flex items-center justify-between`}>
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center">
+          <div className="w-8 h-8 rounded-lg bg-[#2563eb] flex items-center justify-center shrink-0">
             <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M4 12h16M4 17h7" />
             </svg>
           </div>
           <div>
-            <h1 className="text-base font-semibold text-slate-800 leading-tight">AEP Query Connector</h1>
-            <p className="text-xs text-slate-500">Adobe Experience Platform · Query Service</p>
+            <h1 className={`text-sm font-semibold ${C.headingText} leading-tight`}>AEP Query Connector</h1>
+            <p className={`text-[11px] ${C.mutedText}`}>Adobe Experience Platform · Query Service</p>
           </div>
         </div>
-        <StatusDot status={connStatus} />
+        <StatusPill status={connStatus} />
       </header>
 
-      <div className="flex flex-col gap-4 p-5 flex-1">
-        {/* ── top config card ── */}
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-          <h2 className="text-sm font-semibold text-slate-700 mb-4">Configuration</h2>
+      <div className="flex flex-col gap-4 p-4 flex-1 max-w-screen-2xl w-full mx-auto">
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* Config upload */}
-            <div className="sm:col-span-2 lg:col-span-1 flex flex-col gap-1">
+        {/* ── CONFIGURATION CARD ── */}
+        <div className={`${C.cardBg} rounded-xl border ${C.cardBorder} p-5`}>
+          <p className={`text-[11px] font-semibold uppercase tracking-widest ${C.mutedText} mb-4`}>Configuration</p>
+
+          {/* Row 1: Config File | Organization | Tenant | Load Sandboxes button */}
+          <div className="grid grid-cols-12 gap-3 items-end">
+
+            {/* Config File — 3 cols */}
+            <div className="col-span-12 sm:col-span-3">
               <Label>Config File</Label>
-              <input
-                type="file"
-                accept=".json"
-                ref={fileInputRef}
-                onChange={handleFileUpload}
-                className="hidden"
-              />
-              <button
+              <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+              <Btn
+                variant="ghost"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex items-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 transition cursor-pointer w-full"
+                className="w-full"
               >
-                <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M12 12V4m0 0L8 8m4-4l4 4" />
                 </svg>
                 {config ? 'Re-upload Config' : 'Upload Config JSON'}
-              </button>
+              </Btn>
               {config && (
-                <span className="text-xs text-emerald-600 flex items-center gap-1 mt-0.5">
-                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                <p className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1.5">
+                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
                   Config loaded
-                </span>
+                </p>
               )}
             </div>
 
-            {/* Organization */}
-            <div>
+            {/* Organization — 4 cols */}
+            <div className="col-span-12 sm:col-span-4">
               <Label>Organization (IMS_ORG)</Label>
               <ReadonlyField value={org} placeholder="Upload config to populate" />
             </div>
 
-            {/* Tenant */}
-            <div>
+            {/* Tenant — 3 cols */}
+            <div className="col-span-12 sm:col-span-3">
               <Label>Tenant</Label>
               <ReadonlyField value={tenant} placeholder="Load sandboxes to populate" />
             </div>
 
-            {/* Load Sandboxes */}
-            <div className="flex flex-col justify-end">
-              <button
+            {/* Load Sandboxes button — 2 cols */}
+            <div className="col-span-12 sm:col-span-2">
+              <Btn
+                variant="primary"
                 onClick={handleLoadSandboxes}
-                disabled={!config || loadingSandboxes}
-                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                disabled={!config}
+                loading={loadingSandboxes}
+                className="w-full"
               >
+                {!loadingSandboxes && (
+                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582M20 20v-5h-.581M5.404 9A8 8 0 1118.8 15" />
+                  </svg>
+                )}
                 {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
-              </button>
+              </Btn>
             </div>
           </div>
 
-          {/* Sandbox + Connect row */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
-            <div className="sm:col-span-2">
+          {/* Divider */}
+          <div className={`border-t ${C.divider} my-4`} />
+
+          {/* Row 2: Sandbox dropdown | Connect / Disconnect */}
+          <div className="grid grid-cols-12 gap-3 items-end">
+
+            {/* Sandbox — 10 cols */}
+            <div className="col-span-12 sm:col-span-10">
               <Label>Sandbox</Label>
               <select
                 value={selectedSandbox}
-                onChange={e => { setSelectedSandbox(e.target.value); setConnStatus('idle') }}
-                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={sandboxes.length === 0}
+                onChange={e => {
+                  setSelectedSandbox(e.target.value)
+                  if (connStatus === 'connected') {
+                    setConnStatus('idle')
+                    addLog('info', 'Sandbox changed — disconnected.')
+                  }
+                }}
+                disabled={sandboxes.length === 0 || connStatus === 'connected'}
+                className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed appearance-none`}
               >
                 <option value="">— Select a Sandbox —</option>
                 {sandboxes.map(s => (
@@ -279,116 +361,177 @@ export default function App() {
                 ))}
               </select>
             </div>
-            <div className="flex flex-col justify-end">
-              <button
-                onClick={handleConnect}
-                disabled={!selectedSandbox || connecting}
-                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-              >
-                {connecting ? 'Connecting…' : 'Connect'}
-              </button>
+
+            {/* Connect / Disconnect — 2 cols */}
+            <div className="col-span-12 sm:col-span-2">
+              {connStatus === 'connected' ? (
+                <Btn variant="danger" onClick={handleDisconnect} className="w-full">
+                  <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  Disconnect
+                </Btn>
+              ) : (
+                <Btn
+                  variant="success"
+                  onClick={handleConnect}
+                  disabled={!selectedSandbox}
+                  loading={connecting}
+                  className="w-full"
+                >
+                  {!connecting && (
+                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                  )}
+                  {connecting ? 'Connecting…' : 'Connect'}
+                </Btn>
+              )}
             </div>
           </div>
         </div>
 
-        {/* ── main work area: tabs + console ── */}
-        <div className="flex flex-col gap-4 flex-1">
-          {/* tab bar */}
-          <div className="flex gap-0.5 bg-slate-200 rounded-lg p-1 w-fit">
-            {['editor', 'results'].map(tab => (
+        {/* ── TABS + PANELS ── */}
+        <div className="flex flex-col gap-0 flex-1">
+
+          {/* Tab bar */}
+          <div className="flex items-center gap-1 px-1">
+            {[
+              { id: 'editor',  label: 'Query Editor' },
+              { id: 'results', label: `Results${results ? ` (${results.rows.length})` : ''}` },
+            ].map(({ id, label }) => (
               <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
-                  activeTab === tab
-                    ? 'bg-white text-slate-800 shadow-sm'
-                    : 'text-slate-600 hover:text-slate-800'
+                key={id}
+                onClick={() => setActiveTab(id)}
+                className={`px-5 py-2.5 text-sm font-medium rounded-t-lg border-t border-x transition-all ${
+                  activeTab === id
+                    ? `${C.cardBg} ${C.cardBorder} ${C.headingText} border-b-0`
+                    : `bg-transparent border-transparent ${C.tabInactiveText} hover:${C.tabActiveText}`
                 }`}
               >
-                {tab === 'editor' ? 'Query Editor' : 'Results'}
+                {label}
+                {id === 'results' && executing && (
+                  <svg className="inline-block ml-2 w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                  </svg>
+                )}
               </button>
             ))}
           </div>
 
-          {/* tab panels */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col" style={{ minHeight: '320px' }}>
-            {/* Query Editor */}
+          {/* Panel wrapper */}
+          <div className={`${C.cardBg} rounded-b-xl rounded-tr-xl border ${C.cardBorder} flex flex-col`} style={{ minHeight: '380px', height: '420px' }}>
+
+            {/* ── QUERY EDITOR ── */}
             {activeTab === 'editor' && (
-              <div className="flex flex-col flex-1 h-full p-4 gap-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-slate-700">Query Editor</h3>
-                  <button
+              <div className="flex flex-col h-full p-4 gap-3">
+                <div className="flex items-center justify-between shrink-0">
+                  <span className={`text-xs font-semibold uppercase tracking-widest ${C.mutedText}`}>SQL Query</span>
+                  <Btn
+                    variant="success"
                     onClick={handleExecute}
-                    disabled={executing || connStatus !== 'connected'}
-                    className="flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    disabled={connStatus !== 'connected'}
+                    loading={executing}
                   >
-                    {executing ? (
-                      <>
-                        <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                        </svg>
-                        Executing…
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
-                        </svg>
-                        Execute
-                      </>
+                    {!executing && (
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
+                      </svg>
                     )}
-                  </button>
+                    {executing ? 'Executing…' : 'Execute'}
+                  </Btn>
                 </div>
-                <textarea
-                  value={query}
-                  onChange={e => setQuery(e.target.value)}
-                  placeholder="SELECT * FROM your_dataset LIMIT 10;"
-                  spellCheck={false}
-                  className="flex-1 w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-mono text-slate-800 placeholder-slate-400 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  style={{ minHeight: '240px' }}
-                />
+                {/* scrollable editor area */}
+                <div className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]">
+                  <textarea
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    placeholder="SELECT * FROM your_dataset LIMIT 10;"
+                    spellCheck={false}
+                    className={`w-full h-full min-h-[300px] ${C.inputBg} px-4 py-3 text-sm font-mono ${C.bodyText} placeholder-[#3a3d52] resize-none focus:outline-none`}
+                  />
+                </div>
+                {executing && (
+                  <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400">
+                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    Query is running — results will appear in the Results tab when complete…
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Results */}
+            {/* ── RESULTS ── */}
             {activeTab === 'results' && (
-              <div className="flex flex-col flex-1 p-4 gap-3 overflow-hidden">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-slate-700">
-                    Results {results ? <span className="text-slate-400 font-normal">({results.rows.length} rows)</span> : ''}
-                  </h3>
-                  <button
+              <div className="flex flex-col h-full p-4 gap-3">
+                <div className="flex items-center justify-between shrink-0">
+                  <span className={`text-xs font-semibold uppercase tracking-widest ${C.mutedText}`}>
+                    Results
+                    {results && (
+                      <span className="ml-2 normal-case text-[#555870] font-normal">
+                        {results.rows.length} row{results.rows.length !== 1 ? 's' : ''} · {results.columns.length} column{results.columns.length !== 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </span>
+                  <Btn
+                    variant="ghost"
                     onClick={handleCopyResults}
-                    disabled={!results}
-                    className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    disabled={!results || results.rows.length === 0}
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-4 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                     </svg>
                     Copy Results
-                  </button>
+                  </Btn>
                 </div>
 
-                {!results && (
-                  <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">
-                    No results yet. Execute a query to see results here.
+                {/* executing spinner */}
+                {executing && (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3">
+                    <svg className="w-8 h-8 animate-spin text-[#2563eb]" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+                    </svg>
+                    <p className={`text-sm ${C.mutedText}`}>Executing query, please wait…</p>
                   </div>
                 )}
 
-                {results && results.rows.length === 0 && (
-                  <div className="flex-1 flex items-center justify-center text-slate-400 text-sm">
-                    Query executed successfully — no rows returned.
+                {/* empty state */}
+                {!executing && !results && (
+                  <div className="flex-1 flex items-center justify-center">
+                    <p className={`text-sm ${C.mutedText}`}>No results yet. Execute a query to see data here.</p>
                   </div>
                 )}
 
-                {results && results.rows.length > 0 && (
-                  <div className="overflow-auto flex-1 rounded-md border border-slate-200">
-                    <table className="min-w-full text-sm border-collapse">
-                      <thead className="bg-slate-50 sticky top-0">
-                        <tr>
+                {/* zero rows */}
+                {!executing && results && results.rows.length === 0 && (
+                  <div className="flex-1 flex items-center justify-center">
+                    <p className={`text-sm ${C.mutedText}`}>Query executed successfully — no rows returned.</p>
+                  </div>
+                )}
+
+                {/* data table: fixed viewport, both scrollbars, 5-col × 50-row default view */}
+                {!executing && results && results.rows.length > 0 && (
+                  <div
+                    className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]"
+                    style={{
+                      // show ~5 columns (each ~160px) and ~50 rows (each ~34px) before scrolling
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                    }}
+                  >
+                    <table className="border-collapse text-sm" style={{ minWidth: `${Math.max(results.columns.length, 5) * 160}px` }}>
+                      <thead className="sticky top-0 z-10">
+                        <tr className="bg-[#12141c]">
                           {results.columns.map(col => (
-                            <th key={col} className="px-3 py-2 text-left text-xs font-semibold text-slate-600 border-b border-slate-200 whitespace-nowrap">
+                            <th
+                              key={col}
+                              className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-[#8b8fa8] border-b border-[#2a2d3e] border-r border-r-[#1e2030] whitespace-nowrap"
+                              style={{ minWidth: '160px', maxWidth: '280px' }}
+                            >
                               {col}
                             </th>
                           ))}
@@ -396,11 +539,21 @@ export default function App() {
                       </thead>
                       <tbody>
                         {results.rows.map((row, i) => (
-                          <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                          <tr
+                            key={i}
+                            className={`border-b border-[#1e2030] hover:bg-[#22253a] transition-colors ${
+                              i % 2 === 0 ? 'bg-[#1a1d27]' : 'bg-[#15172040]'
+                            }`}
+                            style={{ height: '34px' }}
+                          >
                             {results.columns.map(col => (
-                              <td key={col} className="px-3 py-1.5 text-slate-700 border-b border-slate-100 whitespace-nowrap max-w-xs truncate">
+                              <td
+                                key={col}
+                                className="px-4 py-2 text-[#c9ccd8] border-r border-r-[#1e2030] whitespace-nowrap"
+                                style={{ maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                              >
                                 {row[col] === null || row[col] === undefined ? (
-                                  <span className="text-slate-400 italic">null</span>
+                                  <span className="text-[#3a3d52] italic">null</span>
                                 ) : String(row[col])}
                               </td>
                             ))}
@@ -413,42 +566,51 @@ export default function App() {
               </div>
             )}
           </div>
+        </div>
 
-          {/* Console Log panel */}
-          <div className="bg-slate-900 rounded-xl border border-slate-700 shadow-sm flex flex-col" style={{ minHeight: '180px', maxHeight: '260px' }}>
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-700">
-              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Console Log</span>
-              <button
-                onClick={() => setLogs([])}
-                className="text-xs text-slate-500 hover:text-slate-300 transition"
-              >
-                Clear Logs
-              </button>
+        {/* ── CONSOLE LOG ── */}
+        <div className={`${C.consoleBg} rounded-xl border ${C.consoleBorder} flex flex-col`} style={{ height: '200px' }}>
+          <div className={`flex items-center justify-between px-4 py-2 border-b ${C.consoleBorder} shrink-0`}>
+            <div className="flex items-center gap-2">
+              <div className="flex gap-1">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
+                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
+                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
+              </div>
+              <span className="text-[11px] font-semibold uppercase tracking-widest text-[#3a3d52] ml-1">Console</span>
             </div>
-            <div className="flex-1 overflow-y-auto px-4 py-2 font-mono text-xs space-y-0.5">
-              {logs.length === 0 && (
-                <span className="text-slate-600">No log entries yet.</span>
-              )}
-              {logs.map((entry, i) => (
-                <div key={i} className="flex gap-3">
-                  <span className="text-slate-500 shrink-0">{entry.ts}</span>
-                  <span className={
-                    entry.level === 'error' ? 'text-red-400' :
-                    entry.level === 'warn'  ? 'text-amber-400' :
-                    'text-emerald-400'
-                  }>
-                    [{entry.level.toUpperCase()}]
-                  </span>
-                  <span className="text-slate-300 break-all">{entry.message}</span>
-                </div>
-              ))}
-            </div>
+            <button
+              onClick={() => setLogs([])}
+              className="text-[11px] text-[#3a3d52] hover:text-[#8b8fa8] transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-2 font-mono text-[12px] space-y-0.5">
+            {logs.length === 0 && (
+              <span className="text-[#2a2d3e]">No entries yet.</span>
+            )}
+            {logs.map((entry, i) => (
+              <div key={i} className="flex gap-3 leading-5">
+                <span className="text-[#3a3d52] shrink-0 tabular-nums">{entry.ts}</span>
+                <span className={
+                  entry.level === 'error' ? 'text-red-500 shrink-0' :
+                  entry.level === 'warn'  ? 'text-amber-400 shrink-0' :
+                  'text-[#2563eb] shrink-0'
+                }>
+                  {entry.level === 'error' ? '✖' : entry.level === 'warn' ? '⚠' : '›'}
+                </span>
+                <span className="text-[#8b8fa8] break-all">{entry.message}</span>
+              </div>
+            ))}
+            <div ref={logsEndRef} />
           </div>
         </div>
+
       </div>
 
-      {/* footer */}
-      <footer className="text-center text-xs text-slate-400 py-3 border-t border-slate-200 bg-white">
+      {/* ── FOOTER ── */}
+      <footer className={`text-center text-[11px] ${C.mutedText} py-3 border-t ${C.divider} ${C.cardBg}`}>
         AEP Query Connector · Adobe Experience Platform Query Service
       </footer>
     </div>
