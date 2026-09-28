@@ -334,7 +334,9 @@ export default function App() {
               >
                 {!loadingSandboxes && (
                   <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582M20 20v-5h-.581M5.404 9A8 8 0 1118.8 15" />
+                    <rect x="2" y="3" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
+                    <rect x="2" y="10" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
+                    <rect x="2" y="17" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
                 {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
