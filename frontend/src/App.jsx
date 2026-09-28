@@ -459,7 +459,8 @@ export default function App() {
                   onChange={e => setQuery(e.target.value)}
                   placeholder="SELECT * FROM your_dataset LIMIT 10;"
                   spellCheck={false}
-                  className={`flex-1 w-full rounded-lg border border-[#2a2d3e] ${C.inputBg} px-4 py-3 text-sm font-mono ${C.bodyText} placeholder-[#3a3d52] resize-none overflow-auto focus:outline-none`}
+                  className={`flex-1 w-full rounded-lg border border-[#2a2d3e] ${C.inputBg} px-4 py-3 text-sm ${C.bodyText} placeholder-[#3a3d52] resize-none overflow-auto focus:outline-none`}
+                  style={{ fontFamily: "'Courier New', Courier, monospace" }}
                 />
                 {executing && (
                   <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400">
