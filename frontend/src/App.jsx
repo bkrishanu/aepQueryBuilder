@@ -451,16 +451,14 @@ export default function App() {
                     {executing ? 'Executing…' : 'Execute'}
                   </Btn>
                 </div>
-                {/* scrollable editor area */}
-                <div className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]">
-                  <textarea
-                    value={query}
-                    onChange={e => setQuery(e.target.value)}
-                    placeholder="SELECT * FROM your_dataset LIMIT 10;"
-                    spellCheck={false}
-                    className={`w-full h-full min-h-[300px] ${C.inputBg} px-4 py-3 text-sm font-mono ${C.bodyText} placeholder-[#3a3d52] resize-none focus:outline-none`}
-                  />
-                </div>
+                {/* single scrollable textarea — no wrapper div to avoid double scrollbar */}
+                <textarea
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="SELECT * FROM your_dataset LIMIT 10;"
+                  spellCheck={false}
+                  className={`flex-1 w-full rounded-lg border border-[#2a2d3e] ${C.inputBg} px-4 py-3 text-sm font-mono ${C.bodyText} placeholder-[#3a3d52] resize-none overflow-auto focus:outline-none`}
+                />
                 {executing && (
                   <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400">
                     <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
