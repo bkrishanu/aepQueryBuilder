@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import axios from 'axios'
-import SqlEditor from './SqlEditor.jsx'
+import QueryPane from './QueryPane.jsx'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
@@ -115,17 +115,19 @@ export default function App() {
 
   const [connStatus, setConnStatus]       = useState('idle')
 
-  const [activeTab, setActiveTab]         = useState('editor')
-  const [query, setQuery]                 = useState('')
-  const [results, setResults]             = useState(null)
-  const [executing, setExecuting]         = useState(false)
+  // ── multi-pane state ─────────────────────────────────────────────────────
+  const MAX_PANES = 3
+  const mkPane = (n) => ({ id: Date.now() + n, label: `Query ${n}` })
+  const [panes, setPanes]                 = useState(() => [mkPane(1)])
+  const [activePane, setActivePane]       = useState(0) // index into panes[]
+  const paneRefs                          = useRef({})  // keyed by pane.id
+
   const [loadingSandboxes, setLoadingSandboxes] = useState(false)
   const [connecting, setConnecting]       = useState(false)
 
   const [logs, setLogs]                   = useState([])
   const logsEndRef                        = useRef(null)
   const fileInputRef                      = useRef()
-  const editorRef                         = useRef(null)
 
   const addLog = useCallback((level, message) => {
     setLogs(prev => [...prev, { ts: ts(), level, message }])
@@ -265,42 +267,38 @@ export default function App() {
     addLog('info', `Disconnected from ${label}.`)
   }
 
-  // ── execute query ────────────────────────────────────────────────────────
-  const handleExecute = async () => {
+  // ── execute query (delegates to active pane ref) ─────────────────────────
+  const handleExecute = () => {
     if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return }
-
-    // Resolve which statement to run (selection > cursor statement > full text)
-    const toRun = editorRef.current?.getQueryToRun() ?? query.trim()
-    if (!toRun) { addLog('warn', 'Query is empty.'); return }
-
-    setExecuting(true)
-    addLog('info', `Executing: ${toRun.slice(0, 80)}${toRun.length > 80 ? '…' : ''}`)
-    try {
-      const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
-      const payload = connMode === 'direct'
-        ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd, query: toRun }
-        : { API_KEY: config.API_KEY, CLIENT_SECRET: config.CLIENT_SECRET, SCOPES: config.SCOPES, IMS_ORG: config.IMS_ORG, SANDBOX_NAME: selectedSandbox, query: toRun }
-      const res = await api.post(endpoint, payload)
-      setResults(res.data)
-      setActiveTab('results')  // switch AFTER we have results
-      addLog('info', `Query returned ${res.data.rows.length} row(s) in ${res.data.duration}ms.`)
-    } catch (err) {
-      setResults(null)
-      addLog('error', `Query failed: ${err.response?.data?.error || err.message}`)
-    } finally {
-      setExecuting(false)
-    }
+    const pane = panes[activePane]
+    if (!pane) return
+    const paneRef = paneRefs.current[pane.id]
+    if (!paneRef) return
+    const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
+    const payload  = connMode === 'direct'
+      ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd }
+      : { API_KEY: config.API_KEY, CLIENT_SECRET: config.CLIENT_SECRET, SCOPES: config.SCOPES, IMS_ORG: config.IMS_ORG, SANDBOX_NAME: selectedSandbox }
+    paneRef.execute(endpoint, payload)
   }
 
-  // ── copy results ─────────────────────────────────────────────────────────
-  const handleCopyResults = () => {
-    if (!results) return
-    const lines = [
-      results.columns.join('\t'),
-      ...results.rows.map(r => results.columns.map(c => r[c] ?? '').join('\t')),
-    ]
-    navigator.clipboard.writeText(lines.join('\n'))
-    addLog('info', 'Results copied to clipboard (tab-delimited).')
+  // ── pane management ──────────────────────────────────────────────────────
+  const handleAddPane = () => {
+    if (panes.length >= MAX_PANES) return
+    const newPane = { id: Date.now(), label: `Query ${panes.length + 1}` }
+    const newPanes = [...panes, newPane]
+    setPanes(newPanes)
+    setActivePane(newPanes.length - 1)
+  }
+
+  const handleClosePane = (idx) => {
+    if (panes.length === 1) return // always keep at least one
+    const pane = panes[idx]
+    delete paneRefs.current[pane.id]
+    const newPanes = panes.filter((_, i) => i !== idx)
+    // relabel to keep names tidy
+    const relabeled = newPanes.map((p, i) => ({ ...p, label: `Query ${i + 1}` }))
+    setPanes(relabeled)
+    setActivePane(Math.min(idx, relabeled.length - 1))
   }
 
   // ── render ───────────────────────────────────────────────────────────────
@@ -550,185 +548,74 @@ export default function App() {
           )}
         </div>
 
-        {/* ── TABS + PANELS ── */}
-        <div className="flex flex-col gap-0 flex-1">
+        {/* ── PANE AREA ── */}
+        <div className="flex flex-col flex-1">
 
-          {/* Tab bar */}
+          {/* Outer pane tab bar: Query 1 / Query 2 / Query 3 / [+] / [Execute] */}
           <div className="flex items-center gap-1 px-1">
-            {[
-              { id: 'editor',  label: 'Query Editor' },
-              { id: 'results', label: `Results${results ? ` (${results.rows.length})` : ''}` },
-            ].map(({ id, label }) => (
-              <button
-                key={id}
-                onClick={() => setActiveTab(id)}
-                className={`px-5 py-2.5 text-sm font-medium rounded-t-lg border-t border-x transition-all ${
-                  activeTab === id
+            {panes.map((pane, idx) => (
+              <div
+                key={pane.id}
+                onClick={() => setActivePane(idx)}
+                className={`group flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium rounded-t-lg border-t border-x cursor-pointer transition-all select-none ${
+                  activePane === idx
                     ? `${C.cardBg} ${C.cardBorder} ${C.headingText} border-b-0`
-                    : `bg-transparent border-transparent ${C.tabInactiveText} hover:${C.tabActiveText}`
+                    : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-[#e8eaf0]`
                 }`}
               >
-                {label}
-                {id === 'results' && executing && (
-                  <svg className="inline-block ml-2 w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                  </svg>
+                {pane.label}
+                {/* close button — only show if more than 1 pane */}
+                {panes.length > 1 && (
+                  <button
+                    onClick={e => { e.stopPropagation(); handleClosePane(idx) }}
+                    className="w-3.5 h-3.5 flex items-center justify-center rounded-full text-[#3a3d52] hover:text-[#e8eaf0] hover:bg-[#2a2d3e] transition-all opacity-0 group-hover:opacity-100"
+                    title="Close tab"
+                  >
+                    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2}>
+                      <path d="M2 2l8 8M10 2l-8 8" />
+                    </svg>
+                  </button>
                 )}
-              </button>
+              </div>
             ))}
-          </div>
 
-          {/* Panel wrapper */}
-          <div className={`${C.cardBg} rounded-b-xl rounded-tr-xl border ${C.cardBorder} flex flex-col`} style={{ minHeight: '380px', height: '420px' }}>
-
-            {/* ── QUERY EDITOR ── */}
-            {activeTab === 'editor' && (
-              <div className="flex flex-col h-full p-4 gap-3">
-                <div className="flex items-center justify-between shrink-0">
-                  <span className={`text-xs font-semibold uppercase tracking-widest ${C.mutedText}`}>SQL Query</span>
-                  <Btn
-                    variant="success"
-                    onClick={handleExecute}
-                    disabled={connStatus !== 'connected'}
-                    loading={executing}
-                  >
-                    {!executing && (
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
-                      </svg>
-                    )}
-                    {executing ? 'Executing…' : 'Execute'}
-                  </Btn>
-                </div>
-                {/* CodeMirror SQL editor with syntax highlighting */}
-                <div className="flex-1 rounded-lg border border-[#2a2d3e] overflow-hidden">
-                  <SqlEditor
-                    ref={editorRef}
-                    value={query}
-                    onChange={setQuery}
-                    placeholder="SELECT * FROM your_dataset LIMIT 10;"
-                  />
-                </div>
-                {executing && (
-                  <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400">
-                    <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                    </svg>
-                    Query is running — results will appear in the Results tab when complete…
-                  </div>
-                )}
-              </div>
+            {/* + button (hidden when at max) */}
+            {panes.length < MAX_PANES && (
+              <button
+                onClick={handleAddPane}
+                className={`flex items-center justify-center w-7 h-7 rounded-lg border border-transparent text-[#3a3d52] hover:text-[#e8eaf0] hover:border-[#2a2d3e] hover:bg-[#1a1d27] transition-all`}
+                title="Add query tab"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
             )}
 
-            {/* ── RESULTS ── */}
-            {activeTab === 'results' && (
-              <div className="flex flex-col h-full p-4 gap-3">
-                <div className="flex items-center justify-between shrink-0">
-                  <span className={`text-xs font-semibold uppercase tracking-widest ${C.mutedText}`}>
-                    Results
-                    {results && (
-                      <span className="ml-2 normal-case text-[#555870] font-normal">
-                        {results.rows.length} row{results.rows.length !== 1 ? 's' : ''} · {results.columns.length} column{results.columns.length !== 1 ? 's' : ''}
-                      </span>
-                    )}
-                  </span>
-                  <Btn
-                    variant="ghost"
-                    onClick={handleCopyResults}
-                    disabled={!results || results.rows.length === 0}
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-4 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                    Copy Results
-                  </Btn>
-                </div>
-
-                {/* executing spinner */}
-                {executing && (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-3">
-                    <svg className="w-8 h-8 animate-spin text-[#2563eb]" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-                    </svg>
-                    <p className={`text-sm ${C.mutedText}`}>Executing query, please wait…</p>
-                  </div>
-                )}
-
-                {/* empty state */}
-                {!executing && !results && (
-                  <div className="flex-1 flex items-center justify-center">
-                    <p className={`text-sm ${C.mutedText}`}>No results yet. Execute a query to see data here.</p>
-                  </div>
-                )}
-
-                {/* zero rows */}
-                {!executing && results && results.rows.length === 0 && (
-                  <div className="flex-1 flex items-center justify-center">
-                    <p className={`text-sm ${C.mutedText}`}>Query executed successfully — no rows returned.</p>
-                  </div>
-                )}
-
-                {/* data table */}
-                {!executing && results && results.rows.length > 0 && (() => {
-                  const colCount = results.columns.length
-                  // ≤5 cols → fill width evenly; ≥6 cols → fixed min-width per col, horizontal scroll
-                  const wideMode = colCount > 5
-                  const colWidth = wideMode ? 200 : undefined   // px per col when scrolling
-                  const tableStyle = wideMode
-                    ? { minWidth: `${colCount * colWidth}px` }
-                    : { width: '100%', tableLayout: 'fixed' }
-                  const cellStyle = wideMode
-                    ? { width: `${colWidth}px`, minWidth: `${colWidth}px` }
-                    : { width: `${100 / colCount}%` }
-                  return (
-                  <div className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]">
-                    <table className="border-collapse text-sm" style={tableStyle}>
-                      <thead className="sticky top-0 z-10">
-                        <tr className="bg-[#12141c]">
-                          {results.columns.map(col => (
-                            <th
-                              key={col}
-                              className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-[#8b8fa8] border-b border-[#2a2d3e] border-r border-r-[#1e2030] whitespace-nowrap overflow-hidden text-ellipsis"
-                              style={cellStyle}
-                            >
-                              {col}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {results.rows.map((row, i) => (
-                          <tr
-                            key={i}
-                            className={`border-b border-[#1e2030] hover:bg-[#22253a] transition-colors ${
-                              i % 2 === 0 ? 'bg-[#1a1d27]' : 'bg-[#15172040]'
-                            }`}
-                            style={{ height: '34px' }}
-                          >
-                            {results.columns.map(col => (
-                              <td
-                                key={col}
-                                className="px-4 py-2 text-[#c9ccd8] border-r border-r-[#1e2030] whitespace-nowrap overflow-hidden text-ellipsis"
-                                style={cellStyle}
-                              >
-                                {row[col] === null || row[col] === undefined ? (
-                                  <span className="text-[#3a3d52] italic">null</span>
-                                ) : String(row[col])}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  )
-                })()}
-              </div>
-            )}
+            {/* Execute button — right-aligned */}
+            <div className="ml-auto">
+              <Btn
+                variant="success"
+                onClick={handleExecute}
+                disabled={connStatus !== 'connected'}
+              >
+                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
+                </svg>
+                Execute
+              </Btn>
+            </div>
           </div>
+
+          {/* Render all panes but only show the active one (keeps state alive) */}
+          {panes.map((pane, idx) => (
+            <div key={pane.id} className={idx === activePane ? 'flex flex-col flex-1' : 'hidden'}>
+              <QueryPane
+                ref={el => { paneRefs.current[pane.id] = el }}
+                addLog={addLog}
+              />
+            </div>
+          ))}
         </div>
 
         {/* ── CONSOLE LOG ── */}
