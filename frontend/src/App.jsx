@@ -277,7 +277,8 @@ export default function App() {
           <p className={`text-[11px] font-semibold uppercase tracking-widest ${C.mutedText} mb-4`}>Configuration</p>
 
           {/* Row 1: Config File | Organization | Tenant | Load Sandboxes button */}
-          <div className="grid grid-cols-12 gap-3 items-end">
+          {/* items-start so all cells are top-aligned; each cell has Label + control at fixed height */}
+          <div className="grid grid-cols-12 gap-3 items-start">
 
             {/* Config File — 3 cols */}
             <div className="col-span-12 sm:col-span-3">
@@ -293,30 +294,37 @@ export default function App() {
                 </svg>
                 {config ? 'Re-upload Config' : 'Upload Config JSON'}
               </Btn>
-              {config && (
-                <p className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1.5">
-                  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                  Config loaded
-                </p>
-              )}
+              {/* Fixed-height hint row so it never shifts sibling columns */}
+              <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
+                {config ? (
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                    Config loaded
+                  </span>
+                ) : null}
+              </p>
             </div>
 
             {/* Organization — 4 cols */}
             <div className="col-span-12 sm:col-span-4">
               <Label>Organization (IMS_ORG)</Label>
               <ReadonlyField value={org} placeholder="Upload config to populate" />
+              {/* matching spacer so all columns share the same total height */}
+              <div className="h-5 mt-1.5" />
             </div>
 
             {/* Tenant — 3 cols */}
             <div className="col-span-12 sm:col-span-3">
               <Label>Tenant</Label>
               <ReadonlyField value={tenant} placeholder="Load sandboxes to populate" />
+              <div className="h-5 mt-1.5" />
             </div>
 
             {/* Load Sandboxes button — 2 cols */}
             <div className="col-span-12 sm:col-span-2">
+              <Label>&#8203;</Label>{/* zero-width space keeps label height identical */}
               <Btn
                 variant="primary"
                 onClick={handleLoadSandboxes}
@@ -331,6 +339,7 @@ export default function App() {
                 )}
                 {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
               </Btn>
+              <div className="h-5 mt-1.5" />
             </div>
           </div>
 
