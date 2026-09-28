@@ -3,30 +3,30 @@ import CodeMirror from '@uiw/react-codemirror'
 import { sql } from '@codemirror/lang-sql'
 import { EditorView } from '@codemirror/view'
 
-// ─── DBeaver-inspired dark theme ─────────────────────────────────────────────
-// Colour mapping mirrors DBeaver's default SQL dark theme:
-//   keywords     → bold cornflower-blue   #6495ed
-//   functions    → cyan                   #00bcd4
-//   strings      → olive/khaki            #c8b400
-//   numbers      → light-green            #8bc34a
-//   comments     → grey-green italic      #7a9f60
-//   operators    → sky                    #79c0ff
-//   punctuation  → muted slate            #8b8fa8
-//   identifiers  → off-white              #e8eaf0
-//   background   → deep navy              #0f1117
-//   cursor line   → subtle highlight      #1e2233
-//   selection     → blue tint             #264f78
+// ─── DBeaver-inspired light theme (white background) ─────────────────────────
+// Colour mapping mirrors DBeaver's SQL syntax on a white editor background:
+//   keywords     → bold cornflower-blue   #0000cd  (DBeaver bold blue)
+//   functions    → dark cyan              #007080
+//   strings      → dark red/brown         #a31515
+//   numbers      → dark green             #008000
+//   comments     → grey-green italic      #5f7a5f
+//   operators    → dark blue              #0000ff
+//   punctuation  → dark grey              #555555
+//   identifiers  → near-black             #1f2328
+//   background   → white                  #ffffff
+//   cursor line  → very light blue        #e8f0fe
+//   selection    → light blue tint        #add6ff
 const dbeaverTheme = EditorView.theme(
   {
     '&': {
-      backgroundColor: '#0f1117',
-      color: '#e8eaf0',
+      backgroundColor: '#ffffff',
+      color: '#1f2328',
       fontFamily: "'Courier New', Courier, monospace",
       fontSize: '13px',
       height: '100%',
     },
     '.cm-content': {
-      caretColor: '#528bff',
+      caretColor: '#1f2328',
       padding: '12px 16px',
       minHeight: '100%',
     },
@@ -38,76 +38,76 @@ const dbeaverTheme = EditorView.theme(
     '.cm-line': { lineHeight: '1.6' },
 
     // cursor
-    '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#528bff' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#1f2328' },
 
     // selection
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-      backgroundColor: '#264f78',
+      backgroundColor: '#add6ff',
     },
 
     // active line highlight
-    '.cm-activeLine': { backgroundColor: '#1e2233' },
-    '.cm-activeLineGutter': { backgroundColor: '#1a1d27' },
+    '.cm-activeLine': { backgroundColor: '#e8f0fe' },
+    '.cm-activeLineGutter': { backgroundColor: '#eef2fb' },
 
     // gutter
     '.cm-gutters': {
-      backgroundColor: '#12141c',
-      color: '#3a3d52',
-      borderRight: '1px solid #2a2d3e',
+      backgroundColor: '#f5f5f5',
+      color: '#999999',
+      borderRight: '1px solid #dddddd',
     },
     '.cm-lineNumbers .cm-gutterElement': { padding: '0 12px 0 8px' },
 
     // matched brackets
     '.cm-matchingBracket': {
-      backgroundColor: '#2a3a5e',
-      outline: '1px solid #528bff',
+      backgroundColor: '#c8e6c8',
+      outline: '1px solid #4caf50',
     },
 
     // scrollbar (webkit)
     '.cm-scroller::-webkit-scrollbar': { width: '8px', height: '8px' },
-    '.cm-scroller::-webkit-scrollbar-track': { background: '#12141c' },
+    '.cm-scroller::-webkit-scrollbar-track': { background: '#f5f5f5' },
     '.cm-scroller::-webkit-scrollbar-thumb': {
-      background: '#2a2d3e',
+      background: '#cccccc',
       borderRadius: '4px',
     },
-    '.cm-scroller::-webkit-scrollbar-thumb:hover': { background: '#3a3d52' },
+    '.cm-scroller::-webkit-scrollbar-thumb:hover': { background: '#aaaaaa' },
 
     // placeholder
-    '.cm-placeholder': { color: '#3a3d52' },
+    '.cm-placeholder': { color: '#aaaaaa' },
   },
-  { dark: true }
+  { dark: false }
 )
 
-// SQL token colours matching DBeaver dark theme
+// SQL token colours — DBeaver style on white background
 const sqlHighlightStyle = [
   // keywords  (SELECT, FROM, WHERE, …)
-  { tag: 'keyword', color: '#6495ed', fontWeight: 'bold' },
+  { tag: 'keyword', color: '#0000cd', fontWeight: 'bold' },
   // type keywords (INT, VARCHAR, …)
-  { tag: 'typeName', color: '#6495ed', fontWeight: 'bold' },
-  // built-in functions / operators
-  { tag: 'function(name)', color: '#00bcd4' },
-  { tag: 'variableName', color: '#e8eaf0' },
+  { tag: 'typeName', color: '#0000cd', fontWeight: 'bold' },
+  // built-in functions
+  { tag: 'function(name)', color: '#007080' },
+  { tag: 'variableName', color: '#1f2328' },
   // strings
-  { tag: 'string', color: '#c8b400' },
-  { tag: 'string2', color: '#c8b400' },
+  { tag: 'string', color: '#a31515' },
+  { tag: 'string2', color: '#a31515' },
   // numbers
-  { tag: 'number', color: '#8bc34a' },
+  { tag: 'number', color: '#008000' },
   // comments
-  { tag: 'comment', color: '#7a9f60', fontStyle: 'italic' },
-  { tag: 'lineComment', color: '#7a9f60', fontStyle: 'italic' },
-  { tag: 'blockComment', color: '#7a9f60', fontStyle: 'italic' },
+  { tag: 'comment', color: '#5f7a5f', fontStyle: 'italic' },
+  { tag: 'lineComment', color: '#5f7a5f', fontStyle: 'italic' },
+  { tag: 'blockComment', color: '#5f7a5f', fontStyle: 'italic' },
   // operators  (=, >, <, *, …)
-  { tag: 'operator', color: '#79c0ff' },
-  { tag: 'compareOperator', color: '#79c0ff' },
+  { tag: 'operator', color: '#0000ff' },
+  { tag: 'compareOperator', color: '#0000ff' },
   // punctuation / separators
-  { tag: 'punctuation', color: '#8b8fa8' },
-  { tag: 'separator', color: '#8b8fa8' },
+  { tag: 'punctuation', color: '#555555' },
+  { tag: 'separator', color: '#555555' },
   // identifiers / schema names
-  { tag: 'name', color: '#e8eaf0' },
-  { tag: 'propertyName', color: '#e8eaf0' },
+  { tag: 'name', color: '#1f2328' },
+  { tag: 'propertyName', color: '#1f2328' },
   // special literals (NULL, TRUE, FALSE)
-  { tag: 'bool', color: '#c084fc', fontWeight: 'bold' },
-  { tag: 'null', color: '#c084fc', fontWeight: 'bold' },
+  { tag: 'bool', color: '#7b00d4', fontWeight: 'bold' },
+  { tag: 'null', color: '#7b00d4', fontWeight: 'bold' },
 ]
 
 // ─── helper: resolve the query to run ────────────────────────────────────────

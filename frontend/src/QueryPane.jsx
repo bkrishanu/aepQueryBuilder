@@ -48,8 +48,14 @@ function ResultsTable({ results }) {
     ? { width: `${colWidth}px`, minWidth: `${colWidth}px` }
     : { width: `${100 / colCount}%` }
 
+  // header row ~38px + 50 rows × 34px = 1738px; beyond that vertical scrollbar appears
+  const MAX_VISIBLE_HEIGHT = 38 + 50 * 34
+
   return (
-    <div className="flex-1 overflow-auto rounded-lg border border-[#2a2d3e]">
+    <div
+      className="overflow-auto rounded-lg border border-[#2a2d3e]"
+      style={{ maxHeight: `${MAX_VISIBLE_HEIGHT}px`, flex: '1 1 auto' }}
+    >
       <table className="border-collapse text-sm" style={tableStyle}>
         <thead className="sticky top-0 z-10">
           <tr className="bg-[#12141c]">
