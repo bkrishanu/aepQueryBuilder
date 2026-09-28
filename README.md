@@ -52,22 +52,26 @@ Create a JSON file on your local machine with the following structure:
 
 ```json
 {
-  "IMS_ORG":      "XXXXXXXXXXXXXXXXXXXXXXXX@AdobeOrg",
-  "API_KEY":      "your_api_key_here",
-  "CLIENT_SECRET":"your_client_secret_here",
-  "SCOPES":       "AdobeID,openid,read_organizations,additional_info.projectedProductContext,additional_info.roles,adobeio_api,read_client_secret,manage_client_secrets,session"
+  "CLIENT_SECRET":        "your_client_secret_here",
+  "API_KEY":              "your_api_key_here",
+  "SCOPES":               "AdobeID, openid, read_organizations, additional_info.projectedProductContext, additional_info.roles, adobeio_api, read_client_secret, manage_client_secrets, campaign_sdk, campaign_config_server_general, deliverability_service_general, session, user_management_sdk",
+  "IMS_ORG":              "XXXXXXXXXXXXXXXXXXXXXXXX@AdobeOrg",
+  "TECHNICAL_ACCOUNT_ID": "XXXXXXXXXXXXXXXXXXXXXXXX@techacct.adobe.com",
+  "CONTAINER_ID":         "tenant"
 }
 ```
 
-> **Where to find these values:**  
+> **Where to find these values:**
 > Log in to [Adobe Developer Console](https://developer.adobe.com/console), open your project, select the **OAuth Server-to-Server** credential, and copy the values.
 
 | Key | Description |
 |-----|-------------|
-| `IMS_ORG` | Your Adobe IMS Organization ID (found in Admin Console or Developer Console) |
-| `API_KEY` | Client ID of your AEP API credential |
 | `CLIENT_SECRET` | Client Secret of your AEP API credential |
-| `SCOPES` | Space or comma-separated OAuth scopes required for AEP access |
+| `API_KEY` | Client ID of your AEP API credential |
+| `SCOPES` | Comma-separated OAuth scopes (spaces after commas are automatically stripped by the backend) |
+| `IMS_ORG` | Your Adobe IMS Organization ID (found in Admin Console or Developer Console) |
+| `TECHNICAL_ACCOUNT_ID` | Technical Account ID from your Developer Console credential |
+| `CONTAINER_ID` | Container to use — typically `tenant` |
 
 ### 4. Start the backend
 

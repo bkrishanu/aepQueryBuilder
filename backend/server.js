@@ -15,11 +15,14 @@ app.use(express.json())
  * so it is never stored in any persistent layer.
  */
 async function getAccessToken({ API_KEY, CLIENT_SECRET, SCOPES }) {
+  // Adobe IMS rejects scopes that contain spaces after commas — normalize them
+  const normalizedScopes = SCOPES.split(',').map(s => s.trim()).join(',')
+
   const params = new URLSearchParams()
   params.append('grant_type', 'client_credentials')
   params.append('client_id', API_KEY)
   params.append('client_secret', CLIENT_SECRET)
-  params.append('scope', SCOPES)
+  params.append('scope', normalizedScopes)
 
   const res = await axios.post(
     'https://ims-na1.adobelogin.com/ims/token/v3',
@@ -43,7 +46,7 @@ function tenantFromHost(host) {
  * Returns: { sandboxes: [{name, title}], tenant }
  */
 app.post('/api/sandboxes', async (req, res) => {
-  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG } = req.body
+  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, TECHNICAL_ACCOUNT_ID } = req.body
   try {
     const token = await getAccessToken({ API_KEY, CLIENT_SECRET, SCOPES })
 
@@ -99,7 +102,7 @@ app.post('/api/sandboxes', async (req, res) => {
  * Tests the Postgres connection and returns connection metadata.
  */
 app.post('/api/connect', async (req, res) => {
-  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME } = req.body
+  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME, TECHNICAL_ACCOUNT_ID } = req.body
   try {
     const token = await getAccessToken({ API_KEY, CLIENT_SECRET, SCOPES })
 
@@ -158,7 +161,7 @@ app.post('/api/connect', async (req, res) => {
  * Returns: { columns, rows, duration }
  */
 app.post('/api/query', async (req, res) => {
-  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME, query } = req.body
+  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME, TECHNICAL_ACCOUNT_ID, query } = req.body
   if (!query || !query.trim()) {
     return res.status(400).json({ error: 'Query cannot be empty.' })
   }
