@@ -53,6 +53,14 @@ npm install
 
 ### 3. Start the backend
 
+Optionally set a session key so credential sessions survive backend restarts (without it, a random key is used and you re-upload the config after each restart):
+
+```bash
+cp backend/.env.example backend/.env
+# then set SESSION_SECRET to 32+ random characters, e.g.
+node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+```
+
 ```bash
 cd backend
 npm run dev      # development — auto-reloads on file changes
@@ -112,7 +120,7 @@ Create a `.json` file with the following structure:
 #### Steps
 
 1. Click **Upload Config JSON** and select your config file.  
-   The **Organization (IMS_ORG)** field populates automatically. The config is stored in `sessionStorage` and persists for the browser session; re-upload to replace it.
+   The backend verifies the credentials with Adobe IMS and keeps them in an encrypted, HttpOnly session cookie (valid for 8 hours). The **Organization (IMS_ORG)** field populates automatically and the card shows **Secured in session**. Re-upload to replace the config, or click **Forget** to remove it.
 
 2. Click **Load Sandboxes**.  
    The backend fetches a fresh OAuth token and retrieves all available sandboxes. The **Tenant** field populates from the connection parameters host.
@@ -217,8 +225,10 @@ Click **Clear** to reset the log. The console auto-scrolls to the latest entry.
 ## Security Notes
 
 - **Access tokens are never stored.** A fresh OAuth token is requested on every backend API call and held only in server memory for the duration of that request.
-- The config file is stored in `sessionStorage` — cleared automatically when the browser tab is closed.
-- All AEP API calls are proxied through the Node.js backend. `CLIENT_SECRET` is never sent to or exposed in the browser.
+- **Config secrets never live in the browser.** The uploaded config is sent once to `POST /api/session`, verified with Adobe IMS, encrypted with AES-256-GCM (key derived from `SESSION_SECRET`) and returned as an `aep_session` cookie that is `HttpOnly` (unreadable by page scripts), `SameSite=Strict` (not sent on cross-site requests), `Secure` over HTTPS, and scoped to `/api`. Nothing is written to `sessionStorage`/`localStorage`, and any config left there by older versions is deleted on load.
+- **Credentials are not sent in request bodies.** AEP routes read them from the session cookie on the server; credential fields supplied in a request body are ignored.
+- **Sessions expire after 8 hours** (enforced inside the encrypted payload as well as by the cookie). A tampered or expired cookie is rejected, and the UI asks you to re-upload the config. **Forget** clears the cookie immediately.
+- Sessions are stateless — nothing is stored server-side. Rotating `SESSION_SECRET` invalidates every session.
 - In Direct Connection mode, **passwords are never written to sessionStorage** — only host, port, DB name, and user are persisted.
 
 ---
@@ -248,11 +258,18 @@ aepQueryBuilder/
 
 ### AEP API mode
 
+All routes below except `/api/session` require the `aep_session` cookie; without a valid one they return `401 { code: "SESSION_REQUIRED" }`.
+
 | Method | Endpoint | Body fields | Description |
 |--------|----------|-------------|-------------|
-| `POST` | `/api/sandboxes` | `API_KEY`, `CLIENT_SECRET`, `SCOPES`, `IMS_ORG` | Get OAuth token → list sandboxes + derive tenant |
-| `POST` | `/api/connect` | `API_KEY`, `CLIENT_SECRET`, `SCOPES`, `IMS_ORG`, `SANDBOX_NAME` | Get OAuth token → retrieve sandbox → get connection params → verify Postgres |
-| `POST` | `/api/query` | `API_KEY`, `CLIENT_SECRET`, `SCOPES`, `IMS_ORG`, `SANDBOX_NAME`, `query` | Get OAuth token → get connection params → execute SQL → return rows |
+| `POST` | `/api/session` | config JSON (`API_KEY`, `CLIENT_SECRET`, `SCOPES`, `IMS_ORG`) | Verify with Adobe IMS → set encrypted session cookie → return `{ IMS_ORG, expiresAt }` |
+| `GET` | `/api/session` | — | `{ IMS_ORG, expiresAt }` for the active session, or `401` |
+| `DELETE` | `/api/session` | — | Clear the session cookie |
+| `POST` | `/api/sandboxes` | — | Get OAuth token → list sandboxes + derive tenant |
+| `POST` | `/api/connect` | `SANDBOX_NAME` | Get OAuth token → retrieve sandbox → get connection params → verify Postgres |
+| `POST` | `/api/query` | `SANDBOX_NAME`, `query` | Get OAuth token → get connection params → execute SQL → return rows |
+| `POST` | `/api/datasets` | `SANDBOX_NAME`, `knownMergePolicyIds?` | Stream customer + Profile Snapshot datasets and merge policies (NDJSON) |
+| `POST` | `/api/schema` | `SANDBOX_NAME`, `schemaId` | Fetch a dataset schema's field tree |
 
 ### Direct Connection mode
 
@@ -290,7 +307,7 @@ All `/api/*` requests are routed to the matching serverless function. Everything
    - Click **Add New → Project** and import `bkrishanu/aepQueryBuilder`
    - Vercel will auto-detect the `vercel.json` at the root
 
-3. **No environment variables are required** — all credentials are supplied at runtime by uploading your config JSON in the UI.
+3. **Set one environment variable:** `SESSION_SECRET` — 32+ random characters, used to encrypt the credential session cookie. Without it, the deployed backend refuses to create sessions. AEP credentials themselves are still supplied at runtime by uploading your config JSON in the UI.
 
 4. **Deploy** — click **Deploy**. Vercel will:
    - Run `npm install` at the root (installs `axios` and `pg` for the serverless functions)

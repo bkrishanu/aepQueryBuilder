@@ -1,10 +1,8 @@
 import { useState, useRef, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
-import axios from 'axios'
+import api from './api.js'
 import { LoaderCircle, Copy, Check, Table2, CircleCheck } from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
 import Btn from './Button.jsx'
-
-const api = axios.create({ baseURL: '/api' })
 
 // ─── shared design tokens (keep in sync with App.jsx C object) ───────────────
 const C = {

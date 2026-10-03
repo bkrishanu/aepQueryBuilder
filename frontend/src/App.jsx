@@ -1,15 +1,15 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-import axios from 'axios'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import {
-  SlidersHorizontal, Upload, CircleCheck, Layers, Plug, Unplug, ChevronDown,
+  SlidersHorizontal, Upload, ShieldCheck, Layers, Plug, Unplug, ChevronDown,
   SquareTerminal, Plus, X, Play, Eraser,
 } from 'lucide-react'
+import api, { SESSION_EXPIRED } from './api.js'
 import QueryPane from './QueryPane.jsx'
+import DatasetExplorer from './DatasetExplorer.jsx'
 import Btn from './Button.jsx'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
-const api = axios.create({ baseURL: '/api' })
 
 // ─── design tokens (single source of truth) ──────────────────────────────────
 // Palette: derived from the project logo (public/favicon.svg) —
@@ -108,7 +108,10 @@ export default function App() {
   const [connMode, setConnMode]           = useState('aep')
 
   // AEP mode state
-  const [config, setConfig]               = useState(null)
+  // Non-secret summary of the server-side credential session ({ IMS_ORG, expiresAt }).
+  // The config's secrets are held only in an encrypted HttpOnly cookie.
+  const [session, setSession]             = useState(null)
+  const [uploading, setUploading]         = useState(false)
   const [org, setOrg]                     = useState('')
   const [tenant, setTenant]               = useState('')
   const [sandboxes, setSandboxes]         = useState([])
@@ -154,14 +157,11 @@ export default function App() {
 
   // Restore state from sessionStorage on mount
   useEffect(() => {
-    const stored = sessionStorage.getItem('aep_config')
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored)
-        setConfig(parsed)
-        setOrg(parsed.IMS_ORG || '')
-      } catch { /* ignore */ }
-    }
+    // Older versions kept the full config (incl. CLIENT_SECRET) here — purge it.
+    sessionStorage.removeItem('aep_config')
+    api.get('/session')
+      .then(res => { setSession(res.data); setOrg(res.data.IMS_ORG || '') })
+      .catch(() => { /* no active session */ })
     const storedDirect = sessionStorage.getItem('direct_conn')
     if (storedDirect) {
       try {
@@ -176,43 +176,77 @@ export default function App() {
   }, [])
 
   // ── config upload ────────────────────────────────────────────────────────
+  const resetAepState = () => {
+    setSession(null)
+    setOrg('')
+    setTenant('')
+    setSandboxes([])
+    setSelectedSandbox('')
+    if (connMode === 'aep') setConnStatus('idle')
+  }
+
+  // The file is parsed only to validate it and is posted straight to the backend,
+  // which verifies it with Adobe IMS and seals it into an HttpOnly cookie. Nothing
+  // from it is kept in browser storage or React state except IMS_ORG.
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0]
     if (!file) return
     // reset input so same file can be re-uploaded
     e.target.value = ''
     const reader = new FileReader()
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
+      let parsed
       try {
-        const parsed = JSON.parse(ev.target.result)
-        sessionStorage.setItem('aep_config', JSON.stringify(parsed))
-        setConfig(parsed)
-        setOrg(parsed.IMS_ORG || '')
-        // reset downstream state on new config
-        setTenant('')
-        setSandboxes([])
-        setSelectedSandbox('')
-        setConnStatus('idle')
-        addLog('info', `Config loaded: ${file.name}`)
+        parsed = JSON.parse(ev.target.result)
       } catch {
         addLog('error', 'Failed to parse config — ensure the file is valid JSON.')
+        return
+      }
+      setUploading(true)
+      addLog('info', `Verifying config ${file.name} with Adobe IMS…`)
+      try {
+        const res = await api.post('/session', parsed)
+        resetAepState()
+        setSession(res.data)
+        setOrg(res.data.IMS_ORG || '')
+        addLog('info', `Config verified and secured in an encrypted session (expires ${new Date(res.data.expiresAt).toLocaleTimeString()}).`)
+      } catch (err) {
+        addLog('error', `Config rejected: ${err.response?.data?.error || err.message}`)
+      } finally {
+        setUploading(false)
       }
     }
     reader.readAsText(file)
   }
 
+  // ── forget credentials ───────────────────────────────────────────────────
+  const handleForgetConfig = async () => {
+    try {
+      await api.delete('/session')
+    } catch { /* cookie may already be gone */ }
+    resetAepState()
+    addLog('info', 'Credentials cleared from this browser session.')
+  }
+
+  // ── session expiry (reported by any API call) ────────────────────────────
+  useEffect(() => {
+    const onExpired = () => {
+      setSession(null)
+      setOrg('')
+      setConnStatus(s => (connMode === 'aep' ? 'idle' : s))
+      addLog('warn', 'Credential session expired — please re-upload your config file.')
+    }
+    window.addEventListener(SESSION_EXPIRED, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED, onExpired)
+  }, [connMode, addLog])
+
   // ── load sandboxes ───────────────────────────────────────────────────────
   const handleLoadSandboxes = async () => {
-    if (!config) { addLog('error', 'Upload a config file first.'); return }
+    if (!session) { addLog('error', 'Upload a config file first.'); return }
     setLoadingSandboxes(true)
     addLog('info', 'Fetching sandboxes…')
     try {
-      const res = await api.post('/sandboxes', {
-        API_KEY: config.API_KEY,
-        CLIENT_SECRET: config.CLIENT_SECRET,
-        SCOPES: config.SCOPES,
-        IMS_ORG: config.IMS_ORG,
-      })
+      const res = await api.post('/sandboxes', {})
       setSandboxes(res.data.sandboxes)
       setTenant(res.data.tenant || '')
       addLog('info', `${res.data.sandboxes.length} sandbox(es) loaded. Tenant: ${res.data.tenant}`)
@@ -252,16 +286,10 @@ export default function App() {
     }
 
     // AEP mode
-    if (!config || !selectedSandbox) { setConnecting(false); setConnStatus('idle'); return }
+    if (!session || !selectedSandbox) { setConnecting(false); setConnStatus('idle'); return }
     addLog('info', `Connecting to sandbox "${selectedSandbox}"…`)
     try {
-      const res = await api.post('/connect', {
-        API_KEY: config.API_KEY,
-        CLIENT_SECRET: config.CLIENT_SECRET,
-        SCOPES: config.SCOPES,
-        IMS_ORG: config.IMS_ORG,
-        SANDBOX_NAME: selectedSandbox,
-      })
+      const res = await api.post('/connect', { SANDBOX_NAME: selectedSandbox })
       setConnStatus('connected')
       setConfigCollapsed(true)
       addLog('info', `Connected. Host: ${res.data.host} · DB: ${res.data.dbName}`)
@@ -282,6 +310,13 @@ export default function App() {
     addLog('info', `Disconnected from ${label}.`)
   }
 
+  // ── dataset explorer credentials (AEP mode only, while connected) ────────
+  const explorerCreds = useMemo(() => (
+    connMode === 'aep' && connStatus === 'connected' && session && selectedSandbox
+      ? { IMS_ORG: session.IMS_ORG, SANDBOX_NAME: selectedSandbox }
+      : null
+  ), [connMode, connStatus, session, selectedSandbox])
+
   // ── execute query (delegates to active pane ref) ─────────────────────────
   const handleExecute = () => {
     if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return }
@@ -292,7 +327,7 @@ export default function App() {
     const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
     const payload  = connMode === 'direct'
       ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd }
-      : { API_KEY: config.API_KEY, CLIENT_SECRET: config.CLIENT_SECRET, SCOPES: config.SCOPES, IMS_ORG: config.IMS_ORG, SANDBOX_NAME: selectedSandbox }
+      : { SANDBOX_NAME: selectedSandbox }
     paneRef.execute(endpoint, payload)
   }
 
@@ -415,15 +450,29 @@ export default function App() {
                 <div className="col-span-12 md:col-span-6 lg:col-span-3">
                   <Label>Config File</Label>
                   <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-                  <Btn variant="secondary" icon={Upload} onClick={() => fileInputRef.current?.click()} className="w-full">
-                    {config ? 'Re-upload Config' : 'Upload Config JSON'}
+                  <Btn variant="secondary" icon={Upload} onClick={() => fileInputRef.current?.click()} loading={uploading} className="w-full">
+                    {uploading ? 'Verifying…' : session ? 'Re-upload Config' : 'Upload Config JSON'}
                   </Btn>
                   <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
-                    {config && (
-                      <span className="text-emerald-600 font-medium flex items-center gap-1">
-                        <CircleCheck size={13} strokeWidth={2.25} />
-                        Config loaded
-                      </span>
+                    {session && (
+                      <>
+                        <span
+                          className="text-emerald-600 font-medium flex items-center gap-1"
+                          title={`Credentials are encrypted in an HttpOnly cookie and never stored in the browser. Expires ${new Date(session.expiresAt).toLocaleString()}.`}
+                        >
+                          <ShieldCheck size={13} strokeWidth={2.25} />
+                          Secured in session
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleForgetConfig}
+                          disabled={connStatus === 'connected'}
+                          title={connStatus === 'connected' ? 'Disconnect first' : 'Remove credentials from this browser session'}
+                          className="ml-auto font-semibold text-slate-400 hover:text-rose-600 disabled:opacity-40 disabled:hover:text-slate-400 disabled:cursor-not-allowed"
+                        >
+                          Forget
+                        </button>
+                      </>
                     )}
                   </p>
                 </div>
@@ -445,7 +494,7 @@ export default function App() {
                 {/* Load Sandboxes — 2 cols */}
                 <div className="col-span-12 md:col-span-6 lg:col-span-2">
                   <span className="hidden md:block"><Label>&#8203;</Label></span>
-                  <Btn variant="secondary" icon={Layers} onClick={handleLoadSandboxes} disabled={!config} loading={loadingSandboxes} className="w-full">
+                  <Btn variant="secondary" icon={Layers} onClick={handleLoadSandboxes} disabled={!session} loading={loadingSandboxes} className="w-full">
                     {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
                   </Btn>
                   <div className="hidden lg:block h-5 mt-1.5" />
@@ -582,6 +631,11 @@ export default function App() {
           </div>
         </section>
 
+        {/* ── EXPLORER + WORKSPACE ── */}
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)] gap-5 flex-1 items-stretch">
+
+        <DatasetExplorer credentials={explorerCreds} addLog={addLog} />
+
         {/* ── PANE AREA (workspace card) ── */}
         <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm flex flex-col flex-1 min-w-0`}>
 
@@ -653,6 +707,8 @@ export default function App() {
             </div>
           ))}
         </section>
+
+        </div>
 
         {/* ── CONSOLE LOG ── */}
         <section className={`${C.consoleBg} rounded-2xl border ${C.consoleBorder} shadow-sm flex flex-col overflow-hidden`} style={{ height: '200px' }}>

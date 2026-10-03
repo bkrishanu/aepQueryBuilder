@@ -45,3 +45,29 @@
 .console-scroll::-webkit-scrollbar { width: 8px; }
 .console-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
 .console-scroll ::selection { background-color: #1e40af; color: #fff; }
+
+/* ── dataset explorer ───────────────────────────────────────────────────────── */
+.explorer-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.explorer-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.explorer-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+.explorer-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* children of a just-expanded node slide in */
+@keyframes tree-row-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.tree-row-in { animation: tree-row-in 200ms ease-out both; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.toast-in { animation: toast-in 180ms ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-row-in, .toast-in { animation: none; }
+}
