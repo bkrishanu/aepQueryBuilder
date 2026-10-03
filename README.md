@@ -1,325 +1,391 @@
-# AEP Query Connector
+# AEP Query Editor
 
-A professional web-based query tool for **Adobe Experience Platform (AEP) Query Service**. Connect via AEP API credentials or directly with raw database parameters, write SQL with full syntax highlighting, and execute queries across up to three independent editor tabs — all from the browser.
+A browser-based SQL workbench for **Adobe Experience Platform (AEP) Query Service**.
+Connect with AEP API credentials or raw database parameters, browse every dataset and schema field in a searchable explorer, and run queries across up to three editor tabs.
+
+**Live:** https://aep-query-builder-1oz5.vercel.app
+
+---
+
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Getting started (local)](#getting-started-local)
+- [Connecting](#connecting)
+- [Dataset Explorer](#dataset-explorer)
+- [Query editor](#query-editor)
+- [Results](#results)
+- [Console log](#console-log)
+- [Security](#security)
+- [Deploying to Vercel](#deploying-to-vercel)
+- [API reference](#api-reference)
+- [Project structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Features
+
+| Area | What you get |
+|------|--------------|
+| **Connection** | Two modes — **AEP API** (OAuth server-to-server + sandbox picker) or **Direct Connection** (host / port / database / user / password) |
+| **Credential security** | Uploaded config is verified with Adobe IMS and kept only in an encrypted, HttpOnly session cookie — never in browser storage |
+| **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled* and *Profile Snapshots* (by merge policy) |
+| **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
+| **Query editor** | CodeMirror 6 SQL editor with syntax highlighting, autocompletion, and run-selection / run-statement-at-cursor |
+| **Multiple tabs** | Up to 3 independent query tabs, each with its own editor and results |
+| **Results grid** | Sticky headers, fixed 20-row × 5-column viewport with scrolling, one-click tab-delimited copy for Excel / Sheets |
+| **Console** | Timestamped activity log for every connection, query and explorer action |
 
 ---
 
 ## Architecture
 
 ```
-frontend/   ← React + Vite + Tailwind CSS
-backend/    ← Node.js + Express (API proxy + Postgres client)
+frontend/   React 19 + Vite + Tailwind CSS 4 + CodeMirror 6
+backend/    Node.js + Express 5 — AEP API proxy, OAuth, Postgres client, credential sessions
 ```
 
-| Layer | URL (dev) | Purpose |
-|-------|-----------|---------|
-| Frontend | `http://localhost:5173` | React UI — all user interaction |
-| Backend | `http://localhost:4000` | AEP API calls, OAuth token exchange, Postgres execution |
+| Layer | Local URL | Responsibility |
+|-------|-----------|----------------|
+| Frontend | `http://localhost:5173` | All UI |
+| Backend | `http://localhost:4000` | Adobe IMS token exchange, AEP Platform API calls, Postgres query execution, encrypted session cookie |
 
-In development, Vite proxies all `/api` requests to the backend automatically — no CORS configuration required.
+During development Vite proxies `/api/*` to the backend, so the browser only ever talks to one origin. In production Vercel does the same via `vercel.json` rewrites.
 
 ---
 
-## Prerequisites
+## Getting started (local)
 
-| Tool | Minimum version |
-|------|----------------|
+### Prerequisites
+
+| Tool | Version |
+|------|---------|
 | Node.js | 18+ |
 | npm | 9+ |
-| Git | any recent version |
 
----
-
-## Getting Started
-
-### 1. Clone the repository
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/bkrishanu/aepQueryBuilder.git
 cd aepQueryBuilder
+
+cd frontend && npm install
+cd ../backend && npm install
 ```
 
-### 2. Install dependencies
+### 2. (Optional) set a session key
 
-```bash
-# Frontend
-cd frontend
-npm install
-
-# Backend
-cd ../backend
-npm install
-```
-
-### 3. Start the backend
-
-Optionally set a session key so credential sessions survive backend restarts (without it, a random key is used and you re-upload the config after each restart):
+The backend encrypts your AEP credentials with a key derived from `SESSION_SECRET`.
+Locally it is optional — without it a random key is generated at start-up and you simply re-upload your config after each backend restart.
 
 ```bash
 cp backend/.env.example backend/.env
-# then set SESSION_SECRET to 32+ random characters, e.g.
+# generate a value and paste it into backend/.env as SESSION_SECRET=...
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
 
+### 3. Run
+
 ```bash
+# terminal 1
 cd backend
-npm run dev      # development — auto-reloads on file changes
-# or
-npm start        # production
-```
+npm run dev        # auto-reloads (nodemon); or: npm start
 
-The backend starts on **port 4000**.
-
-### 4. Start the frontend
-
-```bash
+# terminal 2
 cd frontend
 npm run dev
 ```
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5173**.
 
 ---
 
-## Connection Modes
+## Connecting
 
-The tool supports two independent ways to connect to AEP Query Service. Use the toggle in the top-right corner of the **Configuration** card to switch between them. Switching is disabled while a connection is active — disconnect first.
+Use the toggle in the **Configuration** card to choose a mode. The mode can't be switched while connected — disconnect first. After a successful connection the card collapses to a one-line summary; use the chevron to expand it again.
 
----
+### Mode 1 — AEP API
 
-### Mode 1 — AEP API (OAuth + Sandbox)
+#### Prepare a config file
 
-Authenticates via Adobe IMS OAuth and resolves connection parameters automatically from the AEP platform APIs.
-
-#### Prepare your config file
-
-Create a `.json` file with the following structure:
+Create a `.json` file from your **OAuth Server-to-Server** credential in the [Adobe Developer Console](https://developer.adobe.com/console):
 
 ```json
 {
-  "CLIENT_SECRET":        "your_client_secret_here",
-  "API_KEY":              "your_api_key_here",
-  "SCOPES":               "AdobeID, openid, read_organizations, additional_info.projectedProductContext, additional_info.roles, adobeio_api, read_client_secret, manage_client_secrets, campaign_sdk, campaign_config_server_general, deliverability_service_general, session, user_management_sdk",
-  "IMS_ORG":              "XXXXXXXXXXXXXXXXXXXXXXXX@AdobeOrg",
-  "TECHNICAL_ACCOUNT_ID": "XXXXXXXXXXXXXXXXXXXXXXXX@techacct.adobe.com",
-  "CONTAINER_ID":         "tenant"
+  "CLIENT_SECRET": "your_client_secret",
+  "API_KEY":       "your_client_id",
+  "SCOPES":        "openid, AdobeID, read_organizations, additional_info.projectedProductContext, session",
+  "IMS_ORG":       "XXXXXXXXXXXXXXXXXXXXXXXX@AdobeOrg"
 }
 ```
 
-> **Where to find these values:** Log in to [Adobe Developer Console](https://developer.adobe.com/console), open your project, and select the **OAuth Server-to-Server** credential.
+| Key | Required | Description |
+|-----|:--------:|-------------|
+| `API_KEY` | ✅ | Client ID of the credential |
+| `CLIENT_SECRET` | ✅ | Client secret of the credential |
+| `SCOPES` | ✅ | Comma-separated OAuth scopes (spaces after commas are normalised automatically) |
+| `IMS_ORG` | ✅ | IMS Organization ID |
 
-| Key | Description |
-|-----|-------------|
-| `CLIENT_SECRET` | Client Secret of your AEP API credential |
-| `API_KEY` | Client ID of your AEP API credential |
-| `SCOPES` | OAuth scopes — spaces after commas are automatically normalised by the backend |
-| `IMS_ORG` | Your Adobe IMS Organization ID |
-| `TECHNICAL_ACCOUNT_ID` | Technical Account ID from Developer Console |
-| `CONTAINER_ID` | Container to use — typically `tenant` |
+Any other keys (e.g. `TECHNICAL_ACCOUNT_ID`) are ignored. The credential needs access to Query Service, Catalog, Schema Registry, Sandbox Management and (for Profile Snapshots) the Real-Time Customer Profile merge policy API.
 
 #### Steps
 
-1. Click **Upload Config JSON** and select your config file.  
-   The backend verifies the credentials with Adobe IMS and keeps them in an encrypted, HttpOnly session cookie (valid for 8 hours). The **Organization (IMS_ORG)** field populates automatically and the card shows **Secured in session**. Re-upload to replace the config, or click **Forget** to remove it.
+1. **Upload Config JSON** — the backend verifies the credentials with Adobe IMS. On success the card shows **Secured in session** and **Organization** is filled in. Invalid credentials are rejected immediately with Adobe's error message.
+2. **Load Sandboxes** — lists the org's sandboxes and fills in **Tenant**.
+3. **Select a sandbox → Connect** — the header pill turns green and the Dataset Explorer starts loading.
+4. **Disconnect** ends the connection. **Forget** (next to *Secured in session*, available when disconnected) deletes the stored credentials. **Re-upload Config** replaces them.
 
-2. Click **Load Sandboxes**.  
-   The backend fetches a fresh OAuth token and retrieves all available sandboxes. The **Tenant** field populates from the connection parameters host.
-
-3. Select a sandbox from the **Sandbox** dropdown, then click **Connect**.  
-   A green status pill in the header confirms a successful connection.
-
-4. Write and execute queries (see [Query Editor](#query-editor) below).
-
-5. To end the session, click **Disconnect**.
-
----
+The credential session lasts **8 hours** and survives page refreshes. When it expires the app resets the AEP state and asks you to upload the config again.
 
 ### Mode 2 — Direct Connection
 
-Bypasses AEP APIs entirely. Enter raw Postgres credentials and connect directly to any compatible database.
+Connect straight to any Postgres-compatible endpoint (including the AEP Query Service host) without AEP APIs.
 
 | Field | Example | Notes |
 |-------|---------|-------|
-| **Host** | `foo.platform-query.adobe.io` | Full hostname |
-| **Port** | `5432` | Default Postgres port |
-| **Database** | `dbname` | Database / schema name |
-| **User** | `username` | Database username |
-| **Password** | `••••••` | Masked — never stored in sessionStorage |
+| Host | `acme.platform-query.adobe.io` | Required |
+| Port | `5432` | Defaults to 5432 |
+| Database | `prod:all` | Required |
+| User | `ABC123@AdobeOrg` | Required |
+| Password | `••••••` | Never persisted — re-enter each session |
 
-Host, Port, Database, and User are persisted in `sessionStorage` across page refreshes. Password must be re-entered each session.
-
-Click **Connect** once all required fields (Host, Database, User) are filled.
+Host, port, database and user are remembered in `sessionStorage` for the tab's lifetime. SSL is always used. The Dataset Explorer is only available in AEP API mode.
 
 ---
 
-## Query Editor
+## Dataset Explorer
 
-The editor uses **CodeMirror 6** with full SQL syntax highlighting in a DBeaver-style **white** theme:
+The panel to the left of the query editor (above it on small screens) lists the datasets in the connected sandbox.
 
-| Token | Colour |
-|-------|--------|
-| Keywords (`SELECT`, `FROM`, `WHERE`, …) | Bold dark-blue |
-| Built-in functions | Dark cyan |
-| Strings | Dark red |
-| Numbers | Dark green |
-| Comments | Grey-green italic |
-| Operators (`=`, `>`, `*`, …) | Blue |
-| `NULL` / `TRUE` / `FALSE` | Deep purple bold |
-| Identifiers | Near-black |
+### Sections
 
-**Font:** Courier New  
-**Features:** line numbers, bracket matching, active-line highlight, text selection, horizontal + vertical scrollbars.
+```text
+Profile Enabled                 customer datasets with tags.unifiedProfile = enabled:true
+ └── dataset_a        1,234     ← table name, record count
+      └── _tenant
+           └── attributes
+                └── email
+
+Non Profile Enabled             all other customer datasets
+ └── dataset_b       98,765
+
+Profile Snapshots               SYSTEM datasets named "Profile-Snapshot*"
+ ├── Default Time-based  [DEFAULT] [EDGE ACTIVE]    ← merge policy
+ │    └── profile_snapshot_export_…   12,345
+ └── Gold Customers
+      └── profile_snapshot_export_…    6,789
+```
+
+| What | Source |
+|------|--------|
+| Which datasets appear | `classification.managedBy = "CUSTOMER"`, plus `managedBy = "SYSTEM"` whose name starts with `Profile-Snapshot`. All other system datasets are hidden. |
+| Dataset name | `tags["adobe/pqs/table"]` (the name you query) |
+| Record count | `extensions.adobe_lakeHouse.metrics.rowCount`, formatted `1,234,567` |
+| Profile Enabled | `tags.unifiedProfile[0] = "enabled:true"` |
+| Merge policy | `tags.unifiedProfile` entry `mergePolicyId:<id>` → name, `default` (**DEFAULT** badge) and `isActiveOnEdge` (**EDGE ACTIVE** badge) from the merge policy API |
+
+### Loading behaviour
+
+- All Catalog pages (100 datasets each) are fetched automatically and streamed in as they arrive — the tree is usable before loading finishes. Duplicates are removed.
+- Merge policies are fetched once per ID and cached for the sandbox; refreshes skip ones already known.
+- A dataset's **schema is loaded only when you expand it**, then cached. Datasets sharing a schema reuse it. Profile Snapshot datasets have no schema view and never call the Schema Registry.
+- The **refresh** button reloads the list while keeping the current tree visible; expanded schemas refresh in the background.
+
+### Schema fields
+
+Fields are shown by **name** (not title) at any nesting depth, with an icon per datatype — hover the icon for the exact type:
+
+| Icon | Types |
+|------|-------|
+| Text | string |
+| Hash | integer, long, short, byte |
+| Calculator | number, double, float |
+| Toggle | boolean |
+| Calendar | date |
+| Clock | date-time |
+| Folder | object |
+| List | array (tooltip shows the item type, e.g. `array<string>`) |
+| Layers | map |
+| File | unknown |
+
+### Copying
+
+Hover any dataset or field and click the copy icon (or press **C** on the selected row). A toast confirms what was copied.
+
+| Row | Copied value |
+|-----|--------------|
+| Dataset | table name, e.g. `customer_events` |
+| Field | fully qualified path, e.g. `_tenant.attributes.email` |
+| Field under an array | each array addresses its first element: `customer.orders[0].items[0].productId` |
+| Array of primitives | `customer.emails[0]` |
+| Array of arrays | `matrix[0][0]` |
+
+The tree always shows plain names; `[0]` appears only in the copied value (and the hover tooltip).
+
+### Search and navigation
+
+- **Search** filters as you type, case-insensitively, across dataset names and merge policy names. Matches are highlighted and group counts show `matches / total`. A matching merge policy shows all of its snapshot datasets.
+- The search bar stays fixed; only the tree scrolls. Only on-screen rows are rendered, so thousands of datasets and fields stay smooth.
+- **Keyboard:** click the tree (or press ↓ in the search box), then
+
+  | Key | Action |
+  |-----|--------|
+  | ↑ / ↓, Home / End, PgUp / PgDn | Move selection |
+  | → | Expand, or step into the first child |
+  | ← | Collapse, or jump to the parent |
+  | Enter / Space | Toggle expand |
+  | C | Copy the selected dataset name or field path |
+
+- Expanded nodes, search text, scroll position, loaded datasets and schemas are kept per org + sandbox — across refreshes, disconnect / reconnect and sandbox switches.
 
 ---
 
-## Multiple Query Tabs
+## Query editor
 
-Up to **3 independent query tabs** can be open simultaneously. Each tab has its own editor and results — running one tab does not affect another.
+CodeMirror 6 with a DBeaver-style light theme: line numbers, bracket matching, active-line highlight, SQL autocompletion and syntax colours (bold blue keywords, red strings, green numbers, italic comments, purple `NULL` / `TRUE` / `FALSE`). Font: Cascadia Code → Consolas → Courier New.
+
+### Tabs
 
 | Action | How |
 |--------|-----|
-| **Add a tab** | Click the `+` button next to the tab bar (hidden when 3 tabs are open) |
-| **Switch tabs** | Click the tab label — editor content and results are preserved |
-| **Close a tab** | Hover the tab and click `×` (the last remaining tab cannot be closed) |
-| **Execute** | Click the **Execute** button (right side of tab bar) to run the active tab |
+| Add a tab | `+` next to the tabs (hidden once 3 are open) |
+| Switch | Click a tab — editor text and results are preserved |
+| Close | `×` on the tab (the last tab can't be closed) |
+| Run | **Execute** runs the active tab |
 
-### Smart query execution
+### What Execute runs
 
-When you click **Execute**, the editor resolves which statement to run:
+| Situation | Runs |
+|-----------|------|
+| Text is selected | The selection |
+| Several `;`-separated statements | The statement under the cursor |
+| One statement | That statement |
 
-| Scenario | What runs |
-|----------|-----------|
-| Text is **selected** | Only the selected text |
-| Cursor is inside a statement (multi-query editor) | Only the statement at the cursor |
-| Single statement in the editor | That statement |
-
-This means you can write multiple semicolon-separated queries in one editor and run them one at a time by placing the cursor inside or selecting the desired statement.
+Each tab has **Editor** and **Results** sub-tabs; Results shows a row-count badge after a query runs.
 
 ---
 
 ## Results
 
-Each tab has its own **Results** sub-tab:
-
-- **≤ 5 columns** — columns distribute evenly across the full panel width.
-- **6+ columns** — each column gets a fixed width; horizontal scrollbar appears.
-- **50 rows** are visible before the vertical scrollbar activates.
-- **Copy Results** button copies all data to the clipboard in tab-delimited format (paste directly into Excel or Google Sheets).
+- Header shows the row count and execution time.
+- Up to **5 columns** share the full width; more columns get a fixed width with horizontal scrolling.
+- Up to **20 rows** are visible; more rows scroll vertically with a sticky header.
+- **Copy Results** copies everything as tab-delimited text with headers — paste directly into Excel or Google Sheets.
 
 ---
 
-## Console Log
+## Console log
 
-A persistent terminal-style panel at the bottom of the page logs all actions with timestamps:
-
-| Icon | Meaning |
-|------|---------|
-| `›` | Info — normal operations |
-| `⚠` | Warning — e.g. empty query |
-| `✖` | Error — connection failures, query errors |
-
-Click **Clear** to reset the log. The console auto-scrolls to the latest entry.
+A terminal-style panel at the bottom records every action with a millisecond timestamp — `›` info, `⚠` warning, `✖` error. It auto-scrolls to the newest entry; **Clear** empties it.
 
 ---
 
-## Security Notes
+## Security
 
-- **Access tokens are never stored.** A fresh OAuth token is requested on every backend API call and held only in server memory for the duration of that request.
-- **Config secrets never live in the browser.** The uploaded config is sent once to `POST /api/session`, verified with Adobe IMS, encrypted with AES-256-GCM (key derived from `SESSION_SECRET`) and returned as an `aep_session` cookie that is `HttpOnly` (unreadable by page scripts), `SameSite=Strict` (not sent on cross-site requests), `Secure` over HTTPS, and scoped to `/api`. Nothing is written to `sessionStorage`/`localStorage`, and any config left there by older versions is deleted on load.
-- **Credentials are not sent in request bodies.** AEP routes read them from the session cookie on the server; credential fields supplied in a request body are ignored.
-- **Sessions expire after 8 hours** (enforced inside the encrypted payload as well as by the cookie). A tampered or expired cookie is rejected, and the UI asks you to re-upload the config. **Forget** clears the cookie immediately.
-- Sessions are stateless — nothing is stored server-side. Rotating `SESSION_SECRET` invalidates every session.
-- In Direct Connection mode, **passwords are never written to sessionStorage** — only host, port, DB name, and user are persisted.
-
----
-
-## Project Structure
-
-```
-aepQueryBuilder/
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx          ← Main UI — configuration card, pane management, connection logic
-│   │   ├── QueryPane.jsx    ← Self-contained query editor + results tab component
-│   │   ├── SqlEditor.jsx    ← CodeMirror 6 SQL editor with DBeaver light theme
-│   │   └── index.css        ← Tailwind entry + global font
-│   ├── vite.config.js       ← Vite + Tailwind + /api proxy config
-│   └── package.json
-├── backend/
-│   ├── server.js            ← Express API server — all routes
-│   └── package.json
-├── project.md               ← Original requirements
-└── README.md
-```
-
----
-
-## API Reference (Backend)
-
-### AEP API mode
-
-All routes below except `/api/session` require the `aep_session` cookie; without a valid one they return `401 { code: "SESSION_REQUIRED" }`.
-
-| Method | Endpoint | Body fields | Description |
-|--------|----------|-------------|-------------|
-| `POST` | `/api/session` | config JSON (`API_KEY`, `CLIENT_SECRET`, `SCOPES`, `IMS_ORG`) | Verify with Adobe IMS → set encrypted session cookie → return `{ IMS_ORG, expiresAt }` |
-| `GET` | `/api/session` | — | `{ IMS_ORG, expiresAt }` for the active session, or `401` |
-| `DELETE` | `/api/session` | — | Clear the session cookie |
-| `POST` | `/api/sandboxes` | — | Get OAuth token → list sandboxes + derive tenant |
-| `POST` | `/api/connect` | `SANDBOX_NAME` | Get OAuth token → retrieve sandbox → get connection params → verify Postgres |
-| `POST` | `/api/query` | `SANDBOX_NAME`, `query` | Get OAuth token → get connection params → execute SQL → return rows |
-| `POST` | `/api/datasets` | `SANDBOX_NAME`, `knownMergePolicyIds?` | Stream customer + Profile Snapshot datasets and merge policies (NDJSON) |
-| `POST` | `/api/schema` | `SANDBOX_NAME`, `schemaId` | Fetch a dataset schema's field tree |
-
-### Direct Connection mode
-
-| Method | Endpoint | Body fields | Description |
-|--------|----------|-------------|-------------|
-| `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verify Postgres connectivity — no AEP API calls |
-| `POST` | `/api/query/direct` | `host`, `port`, `dbName`, `user`, `password`, `query` | Execute SQL directly — no AEP API calls |
-
-All endpoints return `{ error: "..." }` with HTTP 4xx/5xx on failure.
+| Concern | How it's handled |
+|---------|------------------|
+| Config secrets in the browser | The config is posted once to `POST /api/session`, verified with Adobe IMS, encrypted with **AES-256-GCM** and returned as the `aep_session` cookie: **HttpOnly** (page scripts can't read it), **SameSite=Strict** (not sent cross-site), **Secure** over HTTPS, scoped to `/api`. Nothing is written to `sessionStorage` / `localStorage`; config left there by older versions is deleted on load. |
+| Secrets in requests | Credentials are never sent in request bodies. AEP routes decrypt them from the cookie on the server and ignore any credential fields a client sends. |
+| Expiry and tampering | Sessions expire after 8 hours (checked inside the encrypted payload as well as by the cookie). Modified or expired cookies are rejected. **Forget** clears the cookie immediately. |
+| Server state | None — sessions are stateless, which suits serverless hosting. Rotating `SESSION_SECRET` signs everyone out. |
+| Access tokens | Never stored. A fresh IMS token is requested per backend call and lives only in memory for that request. |
+| Direct-mode password | Kept in memory only; never written to browser storage. |
 
 ---
 
 ## Deploying to Vercel
 
-The project is pre-configured for a **single Vercel deployment** — the React frontend and all API routes deploy together from the repository root.
+The root `vercel.json` defines two services on one domain:
 
-### How it works
+| Service | Root | Runs as |
+|---------|------|---------|
+| `frontend` | `frontend/` | Vite build, served as a static SPA |
+| `backend` | `backend/` | Express app (`server.js`) as a Node serverless function |
 
-| Part | How it runs on Vercel |
-|------|-----------------------|
-| Frontend (`frontend/`) | Built with `vite build`, served as a static site from `frontend/dist/` |
-| Backend (`api/*.js`) | Vercel Serverless Functions — auto-discovered from the `api/` directory |
-
-All `/api/*` requests are routed to the matching serverless function. Everything else (`/*`) is served by the React SPA. No separate backend service is needed.
+Requests to `/api/*` are routed to the backend; everything else to the frontend.
 
 ### Steps
 
-1. **Push to GitHub** — ensure the repository is up to date:
-   ```bash
-   git push
-   ```
+1. Import `bkrishanu/aepQueryBuilder` at [vercel.com/new](https://vercel.com/new). Vercel picks up `vercel.json`.
+2. **Set `SESSION_SECRET`** (Project → Settings → Environment Variables, Production) to 32+ random characters. **Without it the deployed backend refuses to create sessions and config upload fails** with *"Server misconfigured: SESSION_SECRET … must be set"*.
+3. Deploy. Every push to `master` redeploys automatically.
 
-2. **Import the project in Vercel:**
-   - Go to [vercel.com/new](https://vercel.com/new)
-   - Click **Add New → Project** and import `bkrishanu/aepQueryBuilder`
-   - Vercel will auto-detect the `vercel.json` at the root
+> Environment variable changes only apply to **new** deployments — redeploy after adding or changing `SESSION_SECRET`.
+>
+> Vercel blocks deployments whose commit author email isn't linked to a GitHub account. Set the repo's Git email to your GitHub email (`git config user.email "you@example.com"`) and push a new commit; redeploying an older commit keeps its original author.
 
-3. **Set one environment variable:** `SESSION_SECRET` — 32+ random characters, used to encrypt the credential session cookie. Without it, the deployed backend refuses to create sessions. AEP credentials themselves are still supplied at runtime by uploading your config JSON in the UI.
+---
 
-4. **Deploy** — click **Deploy**. Vercel will:
-   - Run `npm install` at the root (installs `axios` and `pg` for the serverless functions)
-   - Run `cd frontend && npm install && npm run build`
-   - Serve `frontend/dist/` as the static frontend
-   - Expose `api/*.js` as serverless functions at `/api/*`
+## API reference
 
-5. Once deployed, open the Vercel URL and use the tool exactly as in local development.
+All endpoints return `{ "error": "…" }` with a 4xx/5xx status on failure.
 
-### Re-deploying after changes
+### Session
 
-Every push to `master` triggers an automatic redeploy on Vercel if you enable **Git Integration** in the Vercel project settings.
+| Method | Endpoint | Body | Result |
+|--------|----------|------|--------|
+| `POST` | `/api/session` | config JSON | Verifies with IMS, sets `aep_session` cookie, returns `{ IMS_ORG, expiresAt }` |
+| `GET` | `/api/session` | — | `{ IMS_ORG, expiresAt }` or `401` |
+| `DELETE` | `/api/session` | — | Clears the cookie (`204`) |
+
+### AEP API mode (require the session cookie)
+
+Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
+
+| Method | Endpoint | Body | Result |
+|--------|----------|------|--------|
+| `POST` | `/api/sandboxes` | — | `{ sandboxes: [{ name, title }], tenant }` |
+| `POST` | `/api/connect` | `SANDBOX_NAME` | Verifies Postgres connectivity; `{ host, port, dbName, username }` |
+| `POST` | `/api/query` | `SANDBOX_NAME`, `query` | `{ columns, rows, duration }` |
+| `POST` | `/api/datasets` | `SANDBOX_NAME`, `knownMergePolicyIds?` | NDJSON stream of `page`, `mergePolicies`, `done` / `error` messages |
+| `POST` | `/api/schema` | `SANDBOX_NAME`, `schemaId` | `{ schemaId, title, fields: [{ name, type, itemType?, arrayDims?, children? }] }` |
+
+### Direct Connection mode
+
+| Method | Endpoint | Body | Result |
+|--------|----------|------|--------|
+| `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verifies connectivity |
+| `POST` | `/api/query/direct` | same + `query` | `{ columns, rows, duration }` |
+
+---
+
+## Project structure
+
+```
+aepQueryBuilder/
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx              Layout, configuration card, connection flow, tabs, console
+│   │   ├── DatasetExplorer.jsx  Virtualized dataset / schema / merge-policy tree
+│   │   ├── QueryPane.jsx        Editor + results for one query tab
+│   │   ├── SqlEditor.jsx        CodeMirror 6 SQL editor and theme
+│   │   ├── Button.jsx           Shared button component
+│   │   ├── api.js               Shared API client + session-expiry signal
+│   │   └── index.css            Tailwind entry, scrollbars, animations
+│   ├── public/                  Logo and favicons
+│   └── vite.config.js           Vite + Tailwind + /api dev proxy
+├── backend/
+│   ├── server.js                Express app — every API route
+│   ├── .env.example             SESSION_SECRET template
+│   └── vercel.json              Backend function config
+├── api/                         Legacy standalone serverless functions (not routed by vercel.json)
+├── docs/                        Requirement specs and change notes
+├── vercel.json                  Frontend + backend services and /api rewrite
+└── README.md
+```
+
+### docs/
+
+| File | Contents |
+|------|----------|
+| [project.md](docs/project.md) | Original project requirements |
+| [CHANGES.md](docs/CHANGES.md) | UI modernisation and branding requirements |
+| [DATASET.md](docs/DATASET.md) | Dataset Explorer specification |
+| [DATASET_ENHANCE.md](docs/DATASET_ENHANCE.md) | Array-path copy and scrollable explorer enhancements |
+| [PROFILE_SNAPSHOT.md](docs/PROFILE_SNAPSHOT.md) | Profile Snapshot and merge policy support |
+| [frontend-vite-template.md](docs/frontend-vite-template.md) | Original Vite + React template notes |
 
 ---
 
@@ -327,11 +393,15 @@ Every push to `master` triggers an automatic redeploy on Vercel if you enable **
 
 | Symptom | Fix |
 |---------|-----|
-| "Failed to parse config JSON file" | Ensure the file is valid JSON — no trailing commas, no comments |
-| "Failed to load sandboxes" | Check `API_KEY`, `CLIENT_SECRET`, and `SCOPES` in your config file |
-| "Connection failed" (AEP mode) | Verify the sandbox is active and your credential has Query Service access |
-| "Connection failed" (Direct mode) | Check host, port, database name, username, and password; ensure SSL is accepted |
-| Query returns no rows | AEP dataset names are case-sensitive — verify the exact name |
-| Multiple queries fail | Place the cursor inside the desired statement, or select the text to run |
-| CORS error in browser | Ensure the backend is running on port 4000 and `npm run dev` is active in the frontend |
-| `+` button not appearing | Maximum of 3 query tabs — close one before adding another |
+| *Failed to parse config* | The file must be valid JSON — no trailing commas or comments |
+| *Config rejected: Adobe IMS rejected the credentials* | Check `API_KEY`, `CLIENT_SECRET` and `SCOPES` against the Developer Console credential |
+| *Server misconfigured: SESSION_SECRET … must be set* | Add `SESSION_SECRET` in Vercel and redeploy (see [Deploying](#deploying-to-vercel)) |
+| *Credential session expired* | Sessions last 8 hours, and a backend restart without `SESSION_SECRET` ends them — upload the config again |
+| *Connection failed* (AEP) | Confirm the sandbox is active and the credential has Query Service access |
+| *Connection failed* (Direct) | Check host, port, database, user and password |
+| Dataset Explorer is empty | It needs AEP API mode; check the console for Catalog errors and the credential's Catalog access |
+| Merge policy shows a warning icon / raw ID | The merge policy lookup failed (hover for details); refresh to retry — the credential needs Profile access |
+| Query returns no rows | Table names are case-sensitive — copy them from the Dataset Explorer |
+| Wrong statement runs | Place the cursor inside the statement you want, or select it |
+| `+` tab button missing | Maximum of 3 tabs — close one first |
+| Vercel: *GitHub user not found* | The commit's author email isn't on your GitHub account — fix `git config user.email` and push a new commit |
