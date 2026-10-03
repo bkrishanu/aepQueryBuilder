@@ -1,5 +1,47 @@
 @import "tailwindcss";
 
-* {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+@theme {
+  --font-sans: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace;
 }
+
+/* In @layer base so Tailwind utilities (e.g. font-mono) can still override it */
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: #f4f6fb;
+  }
+
+  ::selection {
+    background-color: #bfdbfe;
+    color: #0f172a;
+  }
+}
+
+/* ── scrollbars ─────────────────────────────────────────────────────────────── */
+.results-grid {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+.results-grid::-webkit-scrollbar { width: 10px; height: 10px; }
+.results-grid::-webkit-scrollbar-track { background: #f8fafc; }
+.results-grid::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+  border: 2px solid #f8fafc;
+}
+.results-grid::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.results-grid::-webkit-scrollbar-corner { background: #f8fafc; }
+
+.console-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+.console-scroll::-webkit-scrollbar { width: 8px; }
+.console-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+.console-scroll ::selection { background-color: #1e40af; color: #fff; }

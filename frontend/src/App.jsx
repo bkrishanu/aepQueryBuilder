@@ -1,42 +1,56 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import axios from 'axios'
+import {
+  SlidersHorizontal, Upload, CircleCheck, Layers, Plug, Unplug, ChevronDown,
+  SquareTerminal, Plus, X, Play, Eraser,
+} from 'lucide-react'
 import QueryPane from './QueryPane.jsx'
+import Btn from './Button.jsx'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
 const api = axios.create({ baseURL: '/api' })
 
 // ─── design tokens (single source of truth) ──────────────────────────────────
-// Palette: deep navy bg, cool-grey surface, slate text, teal accent
+// Palette: derived from the project logo (public/favicon.svg) —
+// deep navy brand (#0F172A → #1E3A8A), sky accent (#0EA5E9), slate neutrals.
 const C = {
-  pageBg:       'bg-[#0f1117]',
-  cardBg:       'bg-[#1a1d27]',
-  cardBorder:   'border-[#2a2d3e]',
-  inputBg:      'bg-[#12141c]',
-  inputBorder:  'border-[#2a2d3e]',
-  labelText:    'text-[#8b8fa8]',
-  bodyText:     'text-[#c9ccd8]',
-  headingText:  'text-[#e8eaf0]',
-  mutedText:    'text-[#555870]',
-  accentBg:     'bg-[#2563eb]',
-  accentHover:  'hover:bg-[#1d4ed8]',
-  accentText:   'text-[#2563eb]',
-  successBg:    'bg-[#059669]',
-  successHover: 'hover:bg-[#047857]',
-  dangerBg:     'bg-[#dc2626]',
-  dangerHover:  'hover:bg-[#b91c1c]',
-  divider:      'border-[#2a2d3e]',
-  tabActiveBg:  'bg-[#22253a]',
-  tabActiveText:'text-[#e8eaf0]',
-  tabInactiveText: 'text-[#555870]',
-  consoleBg:    'bg-[#0b0d14]',
-  consoleBorder:'border-[#1e2030]',
+  pageBg:       'bg-[#f4f6fb]',
+  cardBg:       'bg-white',
+  cardBorder:   'border-slate-200',
+  inputBg:      'bg-white',
+  inputBorder:  'border-slate-300',
+  labelText:    'text-slate-500',
+  bodyText:     'text-slate-700',
+  headingText:  'text-slate-900',
+  mutedText:    'text-slate-400',
+  accentBg:     'bg-blue-600',
+  accentHover:  'hover:bg-blue-700',
+  accentText:   'text-blue-600',
+  successBg:    'bg-emerald-600',
+  successHover: 'hover:bg-emerald-700',
+  dangerBg:     'bg-rose-600',
+  dangerHover:  'hover:bg-rose-700',
+  divider:      'border-slate-200',
+  tabActiveBg:  'bg-white',
+  tabActiveText:'text-slate-900',
+  tabInactiveText: 'text-slate-500',
+  consoleBg:    'bg-[#0b1220]',
+  consoleBorder:'border-[#1e293b]',
+  brandGradient:'bg-gradient-to-r from-[#0F172A] via-[#132257] to-[#1E3A8A]',
 }
 
+// shared text-input styling
+const inputCls = `w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-slate-400 shadow-sm transition-colors focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:text-slate-500 disabled:cursor-not-allowed`
+
 // ─── small primitives ─────────────────────────────────────────────────────────
+function Logo({ className = 'w-9 h-9' }) {
+  return <img src="/favicon.svg" alt="AEP Query Editor logo" className={`${className} shrink-0`} />
+}
+
 function Label({ children }) {
   return (
-    <label className={`block text-[11px] font-semibold uppercase tracking-widest mb-1.5 ${C.labelText}`}>
+    <label className={`block text-[11px] font-semibold uppercase tracking-wider mb-1.5 ${C.labelText}`}>
       {children}
     </label>
   )
@@ -48,48 +62,42 @@ function ReadonlyField({ value, placeholder }) {
       readOnly
       value={value}
       placeholder={placeholder}
-      className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none font-mono`}
+      className={`w-full rounded-lg border ${C.cardBorder} bg-slate-50 px-3 py-2 text-sm ${C.bodyText} placeholder-slate-400 focus:outline-none font-mono truncate`}
     />
   )
 }
 
-function Btn({ onClick, disabled, variant = 'primary', loading = false, children, className = '' }) {
-  const variants = {
-    primary:     `${C.accentBg} ${C.accentHover} text-white`,
-    success:     `${C.successBg} ${C.successHover} text-white`,
-    danger:      `${C.dangerBg} ${C.dangerHover} text-white`,
-    ghost:       `bg-transparent border ${C.inputBorder} ${C.bodyText} hover:bg-[#22253a]`,
-  }
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled || loading}
-      className={`flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
-    >
-      {loading && (
-        <svg className="w-3.5 h-3.5 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-        </svg>
-      )}
-      {children}
-    </button>
-  )
-}
-
+// Rendered on the dark brand header
 function StatusPill({ status }) {
   const cfg = {
-    idle:       { dot: 'bg-[#3a3d52]',                           label: 'Not connected' },
+    idle:       { dot: 'bg-slate-400',                            label: 'Not connected' },
     connecting: { dot: 'bg-amber-400 animate-pulse',              label: 'Connecting…'   },
-    connected:  { dot: 'bg-emerald-400',                          label: 'Connected'      },
-    error:      { dot: 'bg-red-500',                              label: 'Failed'         },
+    connected:  { dot: 'bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.25)]', label: 'Connected' },
+    error:      { dot: 'bg-red-500 shadow-[0_0_0_3px_rgba(239,68,68,0.25)]',      label: 'Failed'    },
   }
   const { dot, label } = cfg[status] || cfg.idle
   return (
-    <span className={`inline-flex items-center gap-2 rounded-full border ${C.inputBorder} ${C.inputBg} px-3 py-1 text-xs font-medium ${C.bodyText}`}>
+    <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm whitespace-nowrap">
       <span className={`w-2 h-2 rounded-full ${dot}`} />
       {label}
     </span>
+  )
+}
+
+function CardTitle({ icon, title, subtitle, children, className = 'mb-5' }) {
+  return (
+    <div className={`flex flex-wrap items-center justify-between gap-3 transition-[margin] duration-300 ${className}`}>
+      <div className="flex items-center gap-3 min-w-0">
+        <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <h2 className={`text-sm font-semibold ${C.headingText} leading-tight`}>{title}</h2>
+          {subtitle && <p className={`text-xs ${C.mutedText} mt-0.5 truncate`}>{subtitle}</p>}
+        </div>
+      </div>
+      {children}
+    </div>
   )
 }
 
@@ -114,6 +122,10 @@ export default function App() {
   const [directPwd, setDirectPwd]         = useState('')
 
   const [connStatus, setConnStatus]       = useState('idle')
+  // Configuration card can only be collapsed while connected; it auto-collapses
+  // on a successful connect and is always expanded when not connected.
+  const [configCollapsed, setConfigCollapsed] = useState(false)
+  const configOpen = connStatus !== 'connected' || !configCollapsed
 
   // ── multi-pane state ─────────────────────────────────────────────────────
   const MAX_PANES = 3
@@ -126,16 +138,18 @@ export default function App() {
   const [connecting, setConnecting]       = useState(false)
 
   const [logs, setLogs]                   = useState([])
-  const logsEndRef                        = useRef(null)
+  const consoleRef                        = useRef(null)
   const fileInputRef                      = useRef()
 
   const addLog = useCallback((level, message) => {
     setLogs(prev => [...prev, { ts: ts(), level, message }])
   }, [])
 
-  // Auto-scroll console to bottom on new log
+  // Auto-scroll the console box to its newest entry. Scrolls only the console's
+  // own container — scrollIntoView() would also scroll the page to the console.
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = consoleRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [logs])
 
   // Restore state from sessionStorage on mount
@@ -226,6 +240,7 @@ export default function App() {
           user: directUser, password: directPwd,
         })
         setConnStatus('connected')
+        setConfigCollapsed(true)
         addLog('info', `Connected. Host: ${res.data.host} · DB: ${res.data.dbName}`)
       } catch (err) {
         setConnStatus('error')
@@ -248,6 +263,7 @@ export default function App() {
         SANDBOX_NAME: selectedSandbox,
       })
       setConnStatus('connected')
+      setConfigCollapsed(true)
       addLog('info', `Connected. Host: ${res.data.host} · DB: ${res.data.dbName}`)
     } catch (err) {
       setConnStatus('error')
@@ -260,7 +276,6 @@ export default function App() {
   // ── disconnect ───────────────────────────────────────────────────────────
   const handleDisconnect = () => {
     setConnStatus('idle')
-    setResults(null)
     const label = connMode === 'direct'
       ? `${directHost}/${directDb}`
       : `sandbox "${selectedSandbox}"`
@@ -303,74 +318,110 @@ export default function App() {
 
   // ── render ───────────────────────────────────────────────────────────────
   return (
-    <div className={`min-h-screen ${C.pageBg} flex flex-col`} style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+    <div className={`min-h-screen ${C.pageBg} flex flex-col text-slate-700 antialiased`}>
 
-      {/* ── HEADER ── */}
-      <header className={`${C.cardBg} border-b ${C.divider} px-6 py-3 flex items-center justify-between`}>
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-[#2563eb] flex items-center justify-center shrink-0">
-            <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 7h16M4 12h16M4 17h7" />
-            </svg>
-          </div>
-          <div>
-            <h1 className={`text-sm font-semibold ${C.headingText} leading-tight`}>AEP Query Editor</h1>
-            <p className={`text-[11px] ${C.mutedText}`}>Adobe Experience Platform · Query Service</p>
-          </div>
-        </div>
-        <StatusPill status={connStatus} />
-      </header>
-
-      <div className="flex flex-col gap-4 p-4 flex-1 max-w-screen-2xl w-full mx-auto">
-
-        {/* ── CONFIGURATION CARD ── */}
-        <div className={`${C.cardBg} rounded-xl border ${C.cardBorder} p-5`}>
-
-          {/* Card header + mode toggle */}
-          <div className="flex items-center justify-between mb-4">
-            <p className={`text-[11px] font-semibold uppercase tracking-widest ${C.mutedText}`}>Configuration</p>
-            {/* Mode toggle pill */}
-            <div className={`flex rounded-lg border ${C.cardBorder} p-0.5 gap-0.5`}>
-              {[
-                { id: 'aep',    label: 'AEP API' },
-                { id: 'direct', label: 'Direct Connection' },
-              ].map(({ id, label }) => (
-                <button
-                  key={id}
-                  onClick={() => { if (connStatus !== 'connected') { setConnMode(id); setConnStatus('idle') } }}
-                  disabled={connStatus === 'connected'}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:cursor-not-allowed ${
-                    connMode === id
-                      ? 'bg-[#2563eb] text-white'
-                      : `${C.mutedText} hover:text-[#c9ccd8]`
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+      {/* ── HEADER (sticky — stays visible while page content scrolls) ── */}
+      <header className={`sticky top-0 z-40 ${C.brandGradient} border-b border-white/10 shadow-lg shadow-slate-900/10`}>
+        <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <Logo className="w-9 h-9 rounded-[10px] ring-1 ring-white/20 shadow-md" />
+            <div className="min-w-0">
+              <h1 className="text-[15px] font-semibold text-white leading-tight tracking-tight truncate">AEP Query Editor</h1>
+              <p className="hidden sm:block text-[11px] text-sky-200/70 truncate">Adobe Experience Platform · Query Service</p>
             </div>
           </div>
+          <StatusPill status={connStatus} />
+        </div>
+      </header>
+
+      <main className="flex flex-col gap-5 px-3 sm:px-6 py-5 sm:py-6 flex-1 max-w-screen-2xl w-full mx-auto">
+
+        {/* ── CONFIGURATION CARD ── */}
+        <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm p-4 sm:p-6`}>
+
+          {/* Card header + mode toggle / collapsed summary */}
+          <CardTitle
+            title="Configuration"
+            className={configOpen ? 'mb-5' : 'mb-0'}
+            subtitle={
+              connStatus === 'connected'
+                ? `Connected · ${connMode === 'direct' ? `${directHost}:${directPort}/${directDb}` : `${selectedSandbox}${tenant ? ` · ${tenant}` : ''}`}`
+                : connMode === 'aep' ? 'Authenticate with AEP API credentials and pick a sandbox' : 'Connect with raw database parameters'
+            }
+            icon={<SlidersHorizontal size={16} strokeWidth={2.25} />}
+          >
+            <div className="flex items-center gap-2 ml-auto">
+              {/* Mode toggle (segmented control) — hidden while collapsed */}
+              {configOpen && (
+                <div className="flex rounded-lg bg-slate-100 p-1 gap-1 border border-slate-200">
+                  {[
+                    { id: 'aep',    label: 'AEP API' },
+                    { id: 'direct', label: 'Direct Connection' },
+                  ].map(({ id, label }) => (
+                    <button
+                      key={id}
+                      onClick={() => { if (connStatus !== 'connected') { setConnMode(id); setConnStatus('idle') } }}
+                      disabled={connStatus === 'connected'}
+                      className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all disabled:cursor-not-allowed ${
+                        connMode === id
+                          ? 'bg-white text-blue-700 shadow-sm ring-1 ring-slate-200'
+                          : 'text-slate-500 hover:text-slate-800 disabled:hover:text-slate-500'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Disconnect stays reachable while the card is collapsed */}
+              {!configOpen && (
+                <Btn variant="danger" size="sm" icon={Unplug} onClick={handleDisconnect}>
+                  Disconnect
+                </Btn>
+              )}
+
+              {connStatus === 'connected' && (
+                <Btn
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setConfigCollapsed(c => !c)}
+                  title={configOpen ? 'Collapse configuration' : 'Expand configuration'}
+                  className="!px-2"
+                >
+                  <ChevronDown
+                    size={16}
+                    strokeWidth={2.25}
+                    className={`transition-transform duration-300 ${configOpen ? 'rotate-180' : ''}`}
+                  />
+                  <span className="sr-only">{configOpen ? 'Collapse configuration' : 'Expand configuration'}</span>
+                </Btn>
+              )}
+            </div>
+          </CardTitle>
+
+          {/* Collapsible body (animated via grid-template-rows 1fr ↔ 0fr) */}
+          <div
+            className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${configOpen ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}
+            inert={!configOpen}
+          >
+          <div className="min-h-0 overflow-hidden -m-1 p-1">
 
           {/* ── AEP API mode ── */}
           {connMode === 'aep' && (
             <>
-              <div className="grid grid-cols-12 gap-3 items-start">
+              <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-start">
                 {/* Config File — 3 cols */}
-                <div className="col-span-12 sm:col-span-3">
+                <div className="col-span-12 md:col-span-6 lg:col-span-3">
                   <Label>Config File</Label>
                   <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-                  <Btn variant="ghost" onClick={() => fileInputRef.current?.click()} className="w-full">
-                    <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M12 12V4m0 0L8 8m4-4l4 4" />
-                    </svg>
+                  <Btn variant="secondary" icon={Upload} onClick={() => fileInputRef.current?.click()} className="w-full">
                     {config ? 'Re-upload Config' : 'Upload Config JSON'}
                   </Btn>
                   <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
                     {config && (
-                      <span className="text-emerald-400 flex items-center gap-1">
-                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                        </svg>
+                      <span className="text-emerald-600 font-medium flex items-center gap-1">
+                        <CircleCheck size={13} strokeWidth={2.25} />
                         Config loaded
                       </span>
                     )}
@@ -378,70 +429,58 @@ export default function App() {
                 </div>
 
                 {/* Organization — 4 cols */}
-                <div className="col-span-12 sm:col-span-4">
+                <div className="col-span-12 md:col-span-6 lg:col-span-4">
                   <Label>Organization (IMS_ORG)</Label>
                   <ReadonlyField value={org} placeholder="Upload config to populate" />
-                  <div className="h-5 mt-1.5" />
+                  <div className="hidden lg:block h-5 mt-1.5" />
                 </div>
 
                 {/* Tenant — 3 cols */}
-                <div className="col-span-12 sm:col-span-3">
+                <div className="col-span-12 md:col-span-6 lg:col-span-3">
                   <Label>Tenant</Label>
                   <ReadonlyField value={tenant} placeholder="Load sandboxes to populate" />
-                  <div className="h-5 mt-1.5" />
+                  <div className="hidden lg:block h-5 mt-1.5" />
                 </div>
 
                 {/* Load Sandboxes — 2 cols */}
-                <div className="col-span-12 sm:col-span-2">
-                  <Label>&#8203;</Label>
-                  <Btn variant="primary" onClick={handleLoadSandboxes} disabled={!config} loading={loadingSandboxes} className="w-full">
-                    {!loadingSandboxes && (
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <rect x="2" y="3" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                        <rect x="2" y="10" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                        <rect x="2" y="17" width="20" height="5" rx="1" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    )}
+                <div className="col-span-12 md:col-span-6 lg:col-span-2">
+                  <span className="hidden md:block"><Label>&#8203;</Label></span>
+                  <Btn variant="secondary" icon={Layers} onClick={handleLoadSandboxes} disabled={!config} loading={loadingSandboxes} className="w-full">
                     {loadingSandboxes ? 'Loading…' : 'Load Sandboxes'}
                   </Btn>
-                  <div className="h-5 mt-1.5" />
+                  <div className="hidden lg:block h-5 mt-1.5" />
                 </div>
               </div>
 
               <div className={`border-t ${C.divider} my-4`} />
 
               {/* Sandbox + Connect row */}
-              <div className="grid grid-cols-12 gap-3 items-end">
-                <div className="col-span-12 sm:col-span-10">
+              <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-end">
+                <div className="col-span-12 md:col-span-9 lg:col-span-10">
                   <Label>Sandbox</Label>
-                  <select
-                    value={selectedSandbox}
-                    onChange={e => {
-                      setSelectedSandbox(e.target.value)
-                      if (connStatus === 'connected') { setConnStatus('idle'); addLog('info', 'Sandbox changed — disconnected.') }
-                    }}
-                    disabled={sandboxes.length === 0 || connStatus === 'connected'}
-                    className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50 disabled:cursor-not-allowed appearance-none`}
-                  >
-                    <option value="">— Select a Sandbox —</option>
-                    {sandboxes.map(s => <option key={s.name} value={s.name}>{s.title}</option>)}
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={selectedSandbox}
+                      onChange={e => {
+                        setSelectedSandbox(e.target.value)
+                        if (connStatus === 'connected') { setConnStatus('idle'); addLog('info', 'Sandbox changed — disconnected.') }
+                      }}
+                      disabled={sandboxes.length === 0 || connStatus === 'connected'}
+                      className={`${inputCls} appearance-none pr-9 cursor-pointer`}
+                    >
+                      <option value="">— Select a Sandbox —</option>
+                      {sandboxes.map(s => <option key={s.name} value={s.name}>{s.title}</option>)}
+                    </select>
+                    <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  </div>
                 </div>
-                <div className="col-span-12 sm:col-span-2">
+                <div className="col-span-12 md:col-span-3 lg:col-span-2">
                   {connStatus === 'connected' ? (
-                    <Btn variant="danger" onClick={handleDisconnect} className="w-full">
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
+                    <Btn variant="danger" icon={Unplug} onClick={handleDisconnect} className="w-full">
                       Disconnect
                     </Btn>
                   ) : (
-                    <Btn variant="success" onClick={handleConnect} disabled={!selectedSandbox} loading={connecting} className="w-full">
-                      {!connecting && (
-                        <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                        </svg>
-                      )}
+                    <Btn variant="primary" icon={Plug} onClick={handleConnect} disabled={!selectedSandbox} loading={connecting} className="w-full">
                       {connecting ? 'Connecting…' : 'Connect'}
                     </Btn>
                   )}
@@ -452,9 +491,9 @@ export default function App() {
 
           {/* ── Direct Connection mode ── */}
           {connMode === 'direct' && (
-            <div className="grid grid-cols-12 gap-3 items-end">
+            <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-end">
               {/* Host — 4 cols */}
-              <div className="col-span-12 sm:col-span-4">
+              <div className="col-span-12 md:col-span-8 lg:col-span-4">
                 <Label>Host</Label>
                 <input
                   type="text"
@@ -462,12 +501,12 @@ export default function App() {
                   onChange={e => setDirectHost(e.target.value)}
                   placeholder="e.g. foo.platform-query.adobe.io"
                   disabled={connStatus === 'connected'}
-                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                  className={inputCls}
                 />
               </div>
 
               {/* Port — 1 col */}
-              <div className="col-span-6 sm:col-span-1">
+              <div className="col-span-6 md:col-span-4 lg:col-span-1">
                 <Label>Port</Label>
                 <input
                   type="text"
@@ -475,12 +514,12 @@ export default function App() {
                   onChange={e => setDirectPort(e.target.value)}
                   placeholder="5432"
                   disabled={connStatus === 'connected'}
-                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                  className={inputCls}
                 />
               </div>
 
               {/* DB Name — 2 cols */}
-              <div className="col-span-6 sm:col-span-2">
+              <div className="col-span-6 md:col-span-4 lg:col-span-2">
                 <Label>Database</Label>
                 <input
                   type="text"
@@ -488,12 +527,12 @@ export default function App() {
                   onChange={e => setDirectDb(e.target.value)}
                   placeholder="dbname"
                   disabled={connStatus === 'connected'}
-                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                  className={inputCls}
                 />
               </div>
 
               {/* User — 2 cols */}
-              <div className="col-span-6 sm:col-span-2">
+              <div className="col-span-6 md:col-span-4 lg:col-span-2">
                 <Label>User</Label>
                 <input
                   type="text"
@@ -501,12 +540,12 @@ export default function App() {
                   onChange={e => setDirectUser(e.target.value)}
                   placeholder="username"
                   disabled={connStatus === 'connected'}
-                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                  className={inputCls}
                 />
               </div>
 
               {/* Password — 1 col */}
-              <div className="col-span-6 sm:col-span-1">
+              <div className="col-span-6 md:col-span-4 lg:col-span-1">
                 <Label>Password</Label>
                 <input
                   type="password"
@@ -514,94 +553,91 @@ export default function App() {
                   onChange={e => setDirectPwd(e.target.value)}
                   placeholder="••••••"
                   disabled={connStatus === 'connected'}
-                  className={`w-full rounded-lg border ${C.inputBorder} ${C.inputBg} px-3 py-2 text-sm ${C.bodyText} placeholder-[#3a3d52] focus:outline-none focus:ring-1 focus:ring-[#2563eb] disabled:opacity-50`}
+                  className={inputCls}
                 />
               </div>
 
               {/* Connect / Disconnect — 2 cols */}
-              <div className="col-span-12 sm:col-span-2">
+              <div className="col-span-12 lg:col-span-2">
                 {connStatus === 'connected' ? (
-                  <Btn variant="danger" onClick={handleDisconnect} className="w-full">
-                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
+                  <Btn variant="danger" icon={Unplug} onClick={handleDisconnect} className="w-full">
                     Disconnect
                   </Btn>
                 ) : (
                   <Btn
-                    variant="success"
+                    variant="primary"
+                    icon={Plug}
                     onClick={handleConnect}
                     disabled={!directHost || !directDb || !directUser}
                     loading={connecting}
                     className="w-full"
                   >
-                    {!connecting && (
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                      </svg>
-                    )}
                     {connecting ? 'Connecting…' : 'Connect'}
                   </Btn>
                 )}
               </div>
             </div>
           )}
-        </div>
+          </div>
+          </div>
+        </section>
 
-        {/* ── PANE AREA ── */}
-        <div className="flex flex-col flex-1">
+        {/* ── PANE AREA (workspace card) ── */}
+        <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm flex flex-col flex-1 min-w-0`}>
 
-          {/* Outer pane tab bar: Query 1 / Query 2 / Query 3 / [+] / [Execute] */}
-          <div className="flex items-center gap-1 px-1">
-            {panes.map((pane, idx) => (
-              <div
-                key={pane.id}
-                onClick={() => setActivePane(idx)}
-                className={`group flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium rounded-t-lg border-t border-x cursor-pointer transition-all select-none ${
-                  activePane === idx
-                    ? `${C.cardBg} ${C.cardBorder} ${C.headingText} border-b-0`
-                    : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-[#e8eaf0]`
-                }`}
-              >
-                {pane.label}
-                {/* close button — only show if more than 1 pane */}
-                {panes.length > 1 && (
-                  <button
-                    onClick={e => { e.stopPropagation(); handleClosePane(idx) }}
-                    className="w-3.5 h-3.5 flex items-center justify-center rounded-full text-[#3a3d52] hover:text-[#e8eaf0] hover:bg-[#2a2d3e] transition-all opacity-0 group-hover:opacity-100"
-                    title="Close tab"
-                  >
-                    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={2}>
-                      <path d="M2 2l8 8M10 2l-8 8" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            ))}
+          {/* Toolbar: Query 1 / Query 2 / Query 3 / [+] / [Execute] */}
+          <div className={`flex items-center gap-2 px-3 sm:px-4 py-2.5 border-b ${C.divider} bg-slate-50/70 rounded-t-2xl`}>
+            <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
+              {panes.map((pane, idx) => (
+                <div
+                  key={pane.id}
+                  onClick={() => setActivePane(idx)}
+                  className={`group flex items-center gap-2 pl-3 ${panes.length > 1 ? 'pr-2' : 'pr-3'} py-1.5 text-sm font-medium rounded-lg border cursor-pointer transition-all select-none whitespace-nowrap ${
+                    activePane === idx
+                      ? `bg-white border-slate-200 ${C.tabActiveText} shadow-sm`
+                      : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-slate-900 hover:bg-white/70`
+                  }`}
+                >
+                  <SquareTerminal size={15} strokeWidth={2} className={`shrink-0 ${activePane === idx ? 'text-blue-600' : 'text-slate-400'}`} />
+                  {pane.label}
+                  {/* close button — only show if more than 1 pane */}
+                  {panes.length > 1 && (
+                    <button
+                      onClick={e => { e.stopPropagation(); handleClosePane(idx) }}
+                      className={`w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-slate-900 hover:bg-slate-200 transition-all ${
+                        activePane === idx ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                      }`}
+                      title="Close tab"
+                    >
+                      <X size={13} strokeWidth={2.5} />
+                    </button>
+                  )}
+                </div>
+              ))}
 
-            {/* + button (hidden when at max) */}
-            {panes.length < MAX_PANES && (
-              <button
-                onClick={handleAddPane}
-                className={`flex items-center justify-center w-7 h-7 rounded-lg border border-transparent text-[#3a3d52] hover:text-[#e8eaf0] hover:border-[#2a2d3e] hover:bg-[#1a1d27] transition-all`}
-                title="Add query tab"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                </svg>
-              </button>
-            )}
+              {/* + button (hidden when at max) */}
+              {panes.length < MAX_PANES && (
+                <button
+                  onClick={handleAddPane}
+                  className="flex items-center justify-center w-8 h-8 shrink-0 rounded-lg border border-dashed border-slate-300 text-slate-400 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all"
+                  title="Add query tab"
+                >
+                  <Plus size={16} strokeWidth={2.25} />
+                </button>
+              )}
+            </div>
 
             {/* Execute button — right-aligned */}
-            <div className="ml-auto">
+            <div className="ml-auto shrink-0">
               <Btn
                 variant="success"
+                icon={Play}
                 onClick={handleExecute}
                 disabled={connStatus !== 'connected'}
+                title="Run the selected text, or the statement under the cursor"
+                iconClassName="fill-current"
+                className="!px-5"
               >
-                <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z" />
-                </svg>
                 Execute
               </Btn>
             </div>
@@ -609,59 +645,69 @@ export default function App() {
 
           {/* Render all panes but only show the active one (keeps state alive) */}
           {panes.map((pane, idx) => (
-            <div key={pane.id} className={idx === activePane ? 'flex flex-col flex-1' : 'hidden'}>
+            <div key={pane.id} className={idx === activePane ? 'flex flex-col flex-1 min-w-0' : 'hidden'}>
               <QueryPane
                 ref={el => { paneRefs.current[pane.id] = el }}
                 addLog={addLog}
               />
             </div>
           ))}
-        </div>
+        </section>
 
         {/* ── CONSOLE LOG ── */}
-        <div className={`${C.consoleBg} rounded-xl border ${C.consoleBorder} flex flex-col`} style={{ height: '200px' }}>
-          <div className={`flex items-center justify-between px-4 py-2 border-b ${C.consoleBorder} shrink-0`}>
+        <section className={`${C.consoleBg} rounded-2xl border ${C.consoleBorder} shadow-sm flex flex-col overflow-hidden`} style={{ height: '200px' }}>
+          <div className={`flex items-center justify-between px-4 py-2.5 border-b ${C.consoleBorder} bg-[#0f172a] shrink-0`}>
             <div className="flex items-center gap-2">
-              <div className="flex gap-1">
-                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
-                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
-                <span className="w-2.5 h-2.5 rounded-full bg-[#3a3d52]" />
+              <div className="flex gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#ef4444]/70" />
+                <span className="w-2.5 h-2.5 rounded-full bg-[#f59e0b]/70" />
+                <span className="w-2.5 h-2.5 rounded-full bg-[#10b981]/70" />
               </div>
-              <span className="text-[11px] font-semibold uppercase tracking-widest text-[#3a3d52] ml-1">Console</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 ml-1.5">Console</span>
+              {logs.length > 0 && (
+                <span className="text-[10px] font-medium text-slate-400 bg-white/5 border border-white/10 rounded-full px-1.5 py-px tabular-nums">{logs.length}</span>
+              )}
             </div>
             <button
+              type="button"
               onClick={() => setLogs([])}
-              className="text-[11px] text-[#3a3d52] hover:text-[#8b8fa8] transition-colors"
+              className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-white px-2.5 h-7 rounded-md border border-white/10 hover:bg-white/10 hover:border-white/20 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/40"
             >
+              <Eraser size={13} strokeWidth={2.25} />
               Clear
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto px-4 py-2 font-mono text-[12px] space-y-0.5">
+          <div ref={consoleRef} className="console-scroll flex-1 overflow-y-auto px-4 py-2 font-mono text-[12px] space-y-0.5">
             {logs.length === 0 && (
-              <span className="text-[#2a2d3e]">No entries yet.</span>
+              <span className="text-slate-600">No entries yet.</span>
             )}
             {logs.map((entry, i) => (
               <div key={i} className="flex gap-3 leading-5">
-                <span className="text-[#3a3d52] shrink-0 tabular-nums">{entry.ts}</span>
+                <span className="text-slate-500 shrink-0 tabular-nums">{entry.ts}</span>
                 <span className={
-                  entry.level === 'error' ? 'text-red-500 shrink-0' :
+                  entry.level === 'error' ? 'text-red-400 shrink-0' :
                   entry.level === 'warn'  ? 'text-amber-400 shrink-0' :
-                  'text-[#2563eb] shrink-0'
+                  'text-sky-400 shrink-0'
                 }>
                   {entry.level === 'error' ? '✖' : entry.level === 'warn' ? '⚠' : '›'}
                 </span>
-                <span className="text-[#8b8fa8] break-all">{entry.message}</span>
+                <span className={`break-all ${entry.level === 'error' ? 'text-red-300' : 'text-slate-300'}`}>{entry.message}</span>
               </div>
             ))}
-            <div ref={logsEndRef} />
           </div>
-        </div>
+        </section>
 
-      </div>
+      </main>
 
       {/* ── FOOTER ── */}
-      <footer className={`text-center text-[11px] ${C.mutedText} py-3 border-t ${C.divider} ${C.cardBg}`}>
-        AEP Query Editor · Adobe Experience Platform Query Service
+      <footer className={`border-t ${C.divider} ${C.cardBg}`}>
+        <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Logo className="w-5 h-5 rounded-md" />
+            <span className="text-xs font-semibold text-slate-700">AEP Query Editor</span>
+          </div>
+          <p className={`text-[11px] ${C.mutedText}`}>Adobe Experience Platform · Query Service</p>
+        </div>
       </footer>
     </div>
   )

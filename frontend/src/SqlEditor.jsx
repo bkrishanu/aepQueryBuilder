@@ -14,14 +14,16 @@ import { EditorView } from '@codemirror/view'
 //   punctuation  → dark grey              #555555
 //   identifiers  → near-black             #1f2328
 //   background   → white                  #ffffff
-//   cursor line  → very light blue        #e8f0fe
-//   selection    → light blue tint        #add6ff
+//   cursor line  → translucent light blue (lets selection show through)
+//   selection    → saturated blue tint    #9ec5fe (focused) / #c9dcf5 (blurred)
+const MONO_FONT = "'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
+
 const dbeaverTheme = EditorView.theme(
   {
     '&': {
       backgroundColor: '#ffffff',
       color: '#1f2328',
-      fontFamily: "'Courier New', Courier, monospace",
+      fontFamily: MONO_FONT,
       fontSize: '13px',
       height: '100%',
     },
@@ -32,7 +34,7 @@ const dbeaverTheme = EditorView.theme(
     },
     '.cm-scroller': {
       overflow: 'auto',
-      fontFamily: "'Courier New', Courier, monospace",
+      fontFamily: MONO_FONT,
     },
     '.cm-focused': { outline: 'none' },
     '.cm-line': { lineHeight: '1.6' },
@@ -40,13 +42,24 @@ const dbeaverTheme = EditorView.theme(
     // cursor
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#1f2328' },
 
-    // selection
-    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-      backgroundColor: '#add6ff',
+    // selection — CodeMirror paints the selection layer *behind* the text, so
+    // the active-line background below must stay translucent or it hides it.
+    '.cm-selectionBackground, .cm-content ::selection': {
+      backgroundColor: '#c9dcf5',
+    },
+    // must match the specificity of CodeMirror's base-theme focused selector
+    '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, &.cm-focused .cm-content ::selection': {
+      backgroundColor: '#9ec5fe',
+    },
+    // other occurrences of the selected word
+    '.cm-selectionMatch': {
+      backgroundColor: '#fde68a80',
+      outline: '1px solid #f59e0b55',
+      borderRadius: '2px',
     },
 
-    // active line highlight
-    '.cm-activeLine': { backgroundColor: '#e8f0fe' },
+    // active line highlight (translucent so selections remain visible)
+    '.cm-activeLine': { backgroundColor: 'rgba(37, 99, 235, 0.06)' },
     '.cm-activeLineGutter': { backgroundColor: '#eef2fb' },
 
     // gutter
