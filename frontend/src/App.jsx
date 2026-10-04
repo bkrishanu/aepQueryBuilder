@@ -11,6 +11,79 @@ import Btn from './Button.jsx'
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
 
+const DEFAULT_DIRECT_PORT = '80'
+
+// Parses a Postgres connect string into { host, port, dbName, user, password, sslmode }.
+// Accepts the libpq key=value form — optionally wrapped as `psql "…"`, as AEP's
+// "Credentials" panel copies it — or a postgres:// / postgresql:// URI.
+// Only keys present in the string are returned. Throws on unparseable input.
+function parseConnectString(raw) {
+  let s = raw.trim().replace(/^psql\s+/i, '').trim()
+  if (s.length >= 2 && (s[0] === '"' || s[0] === "'") && s.at(-1) === s[0]) s = s.slice(1, -1).trim()
+  if (!s) throw new Error('Connect string is empty.')
+
+  if (/^postgres(ql)?:\/\//i.test(s)) {
+    let u
+    try { u = new URL(s) } catch { throw new Error('Invalid postgres:// URI.') }
+    const out = {}
+    if (u.hostname) out.host = decodeURIComponent(u.hostname)
+    if (u.port) out.port = u.port
+    const db = decodeURIComponent(u.pathname.replace(/^\//, ''))
+    if (db) out.dbName = db
+    if (u.username) out.user = decodeURIComponent(u.username)
+    if (u.password) out.password = decodeURIComponent(u.password)
+    for (const [k, v] of u.searchParams) {
+      if (k === 'host') out.host = v
+      else if (k === 'port') out.port = v
+      else if (k === 'dbname') out.dbName = v
+      else if (k === 'user') out.user = v
+      else if (k === 'password') out.password = v
+      else if (k === 'sslmode') out.sslmode = v
+    }
+    return out
+  }
+
+  // libpq key=value pairs; values may be single-quoted with \' and \\ escapes.
+  const kv = {}
+  let i = 0
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++
+    if (i >= s.length) break
+    const keyStart = i
+    while (i < s.length && s[i] !== '=' && !/\s/.test(s[i])) i++
+    const key = s.slice(keyStart, i).toLowerCase()
+    while (i < s.length && /\s/.test(s[i])) i++
+    if (!key || s[i] !== '=') throw new Error(`Expected "=" after "${key || s.slice(keyStart, keyStart + 10)}".`)
+    i++
+    while (i < s.length && /\s/.test(s[i])) i++
+    let val = ''
+    if (s[i] === "'") {
+      i++
+      while (i < s.length && s[i] !== "'") {
+        if (s[i] === '\\' && i + 1 < s.length) i++
+        val += s[i++]
+      }
+      if (s[i] !== "'") throw new Error(`Unterminated quoted value for "${key}".`)
+      i++
+    } else {
+      while (i < s.length && !/\s/.test(s[i])) {
+        if (s[i] === '\\' && i + 1 < s.length) i++
+        val += s[i++]
+      }
+    }
+    kv[key] = val
+  }
+  const out = {}
+  if (kv.host ?? kv.hostaddr) out.host = kv.host ?? kv.hostaddr
+  if (kv.port) out.port = kv.port
+  if (kv.dbname) out.dbName = kv.dbname
+  if (kv.user) out.user = kv.user
+  if (kv.password) out.password = kv.password
+  if (kv.sslmode) out.sslmode = kv.sslmode
+  if (!Object.keys(out).length) throw new Error('No host, port, dbname, user or password found.')
+  return out
+}
+
 // ─── design tokens (single source of truth) ──────────────────────────────────
 // Palette: derived from the project logo (public/favicon.svg) —
 // deep navy brand (#0F172A → #1E3A8A), sky accent (#0EA5E9), slate neutrals.
@@ -119,10 +192,12 @@ export default function App() {
 
   // Direct mode state
   const [directHost, setDirectHost]       = useState('')
-  const [directPort, setDirectPort]       = useState('5432')
+  const [directPort, setDirectPort]       = useState(DEFAULT_DIRECT_PORT)
   const [directDb, setDirectDb]           = useState('')
   const [directUser, setDirectUser]       = useState('')
   const [directPwd, setDirectPwd]         = useState('')
+  // Pasted connect string; cleared after a successful parse since it holds the password.
+  const [connectString, setConnectString] = useState('')
 
   const [connStatus, setConnStatus]       = useState('idle')
   // Configuration card can only be collapsed while connected; it auto-collapses
@@ -167,7 +242,7 @@ export default function App() {
       try {
         const d = JSON.parse(storedDirect)
         setDirectHost(d.host || '')
-        setDirectPort(d.port || '5432')
+        setDirectPort(d.port || DEFAULT_DIRECT_PORT)
         setDirectDb(d.dbName || '')
         setDirectUser(d.user || '')
         // password is intentionally NOT restored from storage
@@ -254,6 +329,29 @@ export default function App() {
       addLog('error', `Load sandboxes failed: ${err.response?.data?.error || err.message}`)
     } finally {
       setLoadingSandboxes(false)
+    }
+  }
+
+  // ── connect string ───────────────────────────────────────────────────────
+  // Fills the Direct fields from a pasted connect string. The password is never logged.
+  const handleParseConnectString = () => {
+    let parsed
+    try {
+      parsed = parseConnectString(connectString)
+    } catch (err) {
+      addLog('error', `Connect string: ${err.message}`)
+      return
+    }
+    if (parsed.host)     setDirectHost(parsed.host)
+    if (parsed.port)     setDirectPort(parsed.port)
+    if (parsed.dbName)   setDirectDb(parsed.dbName)
+    if (parsed.user)     setDirectUser(parsed.user)
+    if (parsed.password) setDirectPwd(parsed.password)
+    setConnectString('')
+    const filled = ['host', 'port', 'dbName', 'user', 'password'].filter(k => parsed[k])
+    addLog('info', `Connect string parsed — filled ${filled.join(', ')}.`)
+    if (parsed.sslmode && parsed.sslmode !== 'require') {
+      addLog('warn', `sslmode=${parsed.sslmode} ignored — connections always use SSL.`)
     }
   }
 
@@ -540,6 +638,32 @@ export default function App() {
 
           {/* ── Direct Connection mode ── */}
           {connMode === 'direct' && (
+            <>
+            {connStatus !== 'connected' && (
+              <>
+                <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-end">
+                  <div className="col-span-12 md:col-span-9 lg:col-span-10">
+                    <Label>Connect String (optional)</Label>
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={connectString}
+                      onChange={e => setConnectString(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter' && connectString.trim()) handleParseConnectString() }}
+                      placeholder='Paste psql "sslmode=require host=… port=… dbname=… user=… password=…" or postgresql://…'
+                      className={`${inputCls} font-mono`}
+                    />
+                  </div>
+                  <div className="col-span-12 md:col-span-3 lg:col-span-2">
+                    <Btn variant="secondary" icon={SlidersHorizontal} onClick={handleParseConnectString} disabled={!connectString.trim()} className="w-full">
+                      Fill Fields
+                    </Btn>
+                  </div>
+                </div>
+                <div className={`border-t ${C.divider} my-4`} />
+              </>
+            )}
             <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-end">
               {/* Host — 4 cols */}
               <div className="col-span-12 md:col-span-8 lg:col-span-4">
@@ -561,7 +685,7 @@ export default function App() {
                   type="text"
                   value={directPort}
                   onChange={e => setDirectPort(e.target.value)}
-                  placeholder="5432"
+                  placeholder={DEFAULT_DIRECT_PORT}
                   disabled={connStatus === 'connected'}
                   className={inputCls}
                 />
@@ -626,15 +750,17 @@ export default function App() {
                 )}
               </div>
             </div>
+            </>
           )}
           </div>
           </div>
         </section>
 
         {/* ── EXPLORER + WORKSPACE ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)] gap-5 flex-1 items-stretch">
+        {/* Dataset Explorer relies on AEP APIs, so it is hidden in Direct mode */}
+        <div className={`grid grid-cols-1 ${connMode === 'aep' ? 'lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)]' : ''} gap-5 flex-1 items-stretch`}>
 
-        <DatasetExplorer credentials={explorerCreds} addLog={addLog} />
+        {connMode === 'aep' && <DatasetExplorer credentials={explorerCreds} addLog={addLog} />}
 
         {/* ── PANE AREA (workspace card) ── */}
         <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm flex flex-col flex-1 min-w-0`}>
