@@ -3,7 +3,7 @@ import api, { isSessionError, notifySessionExpired } from './api.js'
 import {
   ChevronRight, Search, X, RefreshCw, Copy, Check, LoaderCircle, Database, UserCheck,
   Table2, Type, Hash, Calculator, ToggleLeft, Calendar, Clock, Folder, List, Layers, File,
-  TriangleAlert, FolderTree, Camera, GitMerge,
+  TriangleAlert, FolderTree, Camera, GitMerge, Server, Users,
 } from 'lucide-react'
 
 
@@ -15,11 +15,15 @@ const OVERSCAN = 12
 const INDENT   = 14
 const PAD_TOP  = 4
 
+// Schema-backed groups. `trailing` groups render after Profile Snapshots.
+// Each dataset lands in exactly one group, driven by the server-assigned kind.
 const GROUPS = [
-  { key: 'g:profile',    label: 'Profile Enabled',     profile: true,  icon: UserCheck },
-  { key: 'g:nonprofile', label: 'Non Profile Enabled', profile: false, icon: Database  },
+  { key: 'g:profile',    label: 'Profile Enabled',     icon: UserCheck, iconClass: 'text-emerald-600', match: d => d.kind === 'standard' && d.profileEnabled },
+  { key: 'g:nonprofile', label: 'Non Profile Enabled', icon: Database,  iconClass: 'text-slate-500',   match: d => d.kind === 'standard' && !d.profileEnabled },
+  { key: 'g:system',     label: 'System',              icon: Server,    iconClass: 'text-amber-600',   match: d => d.kind === 'system',          trailing: true },
+  { key: 'g:segsnaps',   label: 'Segment Snapshot',    icon: Users,     iconClass: 'text-sky-600',     match: d => d.kind === 'segmentSnapshot', trailing: true },
 ]
-const SNAPSHOT_GROUP = { key: 'g:snapshots', label: 'Profile Snapshots', icon: Camera, snapshot: true }
+const SNAPSHOT_GROUP = { key: 'g:snapshots', label: 'Profile Snapshots', icon: Camera, iconClass: 'text-indigo-600' }
 const NO_POLICY = '__none__'          // snapshot datasets without a mergePolicyId tag
 
 const isSnapshot = (d) => d.kind === 'snapshot'
@@ -277,7 +281,7 @@ export default function DatasetExplorer({ credentials, addLog }) {
             finished = true
             commitDatasets(key, Array.from(byId.values()))
             setLoadState('done')
-            addLog('info', `Dataset explorer: ${byId.size} customer dataset(s) loaded (${msg.scanned} scanned).`)
+            addLog('info', `Dataset explorer: ${byId.size} dataset(s) loaded (${msg.scanned} scanned).`)
           } else if (msg.type === 'error') {
             throw new Error(msg.error)
           }
@@ -354,11 +358,10 @@ export default function DatasetExplorer({ credentials, addLog }) {
   const grouped = useMemo(() => {
     const standard = datasets.filter(d => !isSnapshot(d)).sort((a, b) => a.name.localeCompare(b.name))
     const match = deferredQuery ? (d) => d.name.toLowerCase().includes(deferredQuery) : () => true
-    return GROUPS.map(g => ({
-      ...g,
-      all: standard.filter(d => d.profileEnabled === g.profile).length,
-      items: standard.filter(d => d.profileEnabled === g.profile && match(d)),
-    }))
+    return GROUPS.map(g => {
+      const members = standard.filter(g.match)
+      return { ...g, all: members.length, items: members.filter(match) }
+    })
   }, [datasets, deferredQuery])
 
   const snapshotGroup = useMemo(() => {
@@ -396,12 +399,13 @@ export default function DatasetExplorer({ credentials, addLog }) {
       kind: 'dataset', key: `d:${ds.id}`, parentKey, depth, dataset: ds, hasChildren: !isSnapshot(ds),
     })
 
-    for (const g of grouped) {
+    // group → dataset → schema fields
+    const pushGroup = (g) => {
       out.push({ kind: 'group', key: g.key, depth: 0, group: g, hasChildren: true })
-      if (!expanded.has(g.key)) continue
+      if (!expanded.has(g.key)) return
       if (g.items.length === 0) {
         out.push(emptyNote(g.key, 1))
-        continue
+        return
       }
       for (const ds of g.items) {
         const dKey = `d:${ds.id}`
@@ -424,6 +428,8 @@ export default function DatasetExplorer({ credentials, addLog }) {
       }
     }
 
+    for (const g of grouped) if (!g.trailing) pushGroup(g)
+
     // Profile Snapshots → merge policy → snapshot dataset
     const sg = snapshotGroup
     out.push({ kind: 'group', key: sg.key, depth: 0, group: sg, hasChildren: true })
@@ -435,6 +441,8 @@ export default function DatasetExplorer({ credentials, addLog }) {
         if (expanded.has(pKey)) for (const ds of p.items) pushDataset(ds, pKey, 2)
       }
     }
+
+    for (const g of grouped) if (g.trailing) pushGroup(g)
     return out
   }, [grouped, snapshotGroup, expanded, schemas, loadState, deferredQuery])
 
@@ -559,7 +567,7 @@ export default function DatasetExplorer({ credentials, addLog }) {
               {!credentials ? 'Connect via AEP API to browse datasets'
                 : loadState === 'loading' ? `Loading… ${total.toLocaleString('en-US')} found`
                 : loadState === 'error' ? 'Failed to load datasets'
-                : `${total.toLocaleString('en-US')} customer datasets`}
+                : `${total.toLocaleString('en-US')} datasets`}
             </p>
           </div>
           {credentials && (
@@ -768,7 +776,7 @@ function TreeRow({ id, row, top, open, active, treeFocused, animate, query, onCl
     return (
       <div {...treeitem} className={`${base} ${hover} cursor-pointer font-semibold text-slate-800`}>
         {chevron}
-        <Icon size={14} strokeWidth={2.25} className={`shrink-0 ${g.profile ? 'text-emerald-600' : g.snapshot ? 'text-indigo-600' : 'text-slate-500'}`} />
+        <Icon size={14} strokeWidth={2.25} className={`shrink-0 ${g.iconClass}`} />
         <span className="truncate text-[12px] uppercase tracking-wider">{g.label}</span>
         <span className="ml-auto shrink-0 text-[10px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-1.5 py-px tabular-nums">
           {query ? `${g.matched ?? g.items.length} / ${g.all}` : g.all}

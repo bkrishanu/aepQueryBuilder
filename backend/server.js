@@ -420,17 +420,51 @@ function aepHeaders({ token, API_KEY, IMS_ORG, SANDBOX_NAME }) {
 }
 
 const SNAPSHOT_PREFIX = 'Profile-Snapshot'
+const SEGMENT_SNAPSHOT_PREFIX = 'segmentdefinition-snapshot' // compared lower-cased
 const MERGE_POLICY_CONCURRENCY = 8
+
+// System (AJO / journey) datasets shown in the explorer's "System" group,
+// matched case-insensitively on the Catalog dataset name.
+const SYSTEM_DATASET_NAMES = new Set([
+  'AJO Message Feedback Event Dataset',
+  'AJO Push Tracking Experience Event Dataset',
+  'AJO Push Profile Dataset',
+  'AJO Consent Service Dataset',
+  'AJO Email Tracking Experience Event Dataset',
+  'AJO Classification Dataset',
+  'AJO Profile Counters Extension',
+  'AJO Entity Dataset',
+  'AJO Secondary Recipient Feedback Event Dataset',
+  'AJO Interactive Messaging Profile Dataset',
+  'AJO STO Summary Dataset',
+  'AJO Inbound Activity Event Dataset',
+  'AJO Surfaces Dataset',
+  'Journeys',
+  'Journey Step Events',
+  'AJO ExD Decision Event Dataset',
+  'AJO Live Activities Feedback Event Dataset',
+  'AJO Channel Tracking Event Dataset',
+  'AJO Message Export Dataset',
+  'AJO Message Event Metadata Dataset',
+].map(n => n.toLowerCase()))
 
 /**
  * Reduce a raw Catalog dataset to the fields the explorer needs, or null if it
- * should be hidden. Shown: every CUSTOMER-managed dataset, plus SYSTEM-managed
- * datasets whose name starts with "Profile-Snapshot" (kind: 'snapshot').
+ * should be hidden. Shown:
+ *   - datasets named "Segmentdefinition-Snapshot*", whoever manages them (kind: 'segmentSnapshot')
+ *   - every other CUSTOMER-managed dataset (kind: 'standard')
+ *   - SYSTEM-managed datasets whose name starts with "Profile-Snapshot" (kind: 'snapshot')
+ *   - non-customer datasets named in SYSTEM_DATASET_NAMES (kind: 'system')
+ * Segment snapshot and system datasets carry a schemaId like standard ones.
  */
 function toExplorerDataset(id, ds) {
   const managedBy = ds?.classification?.managedBy
-  const snapshot = managedBy === 'SYSTEM' && typeof ds.name === 'string' && ds.name.startsWith(SNAPSHOT_PREFIX)
-  if (managedBy !== 'CUSTOMER' && !snapshot) return null
+  const rawName = typeof ds?.name === 'string' ? ds.name.trim() : ''
+  const lower = rawName.toLowerCase()
+  const segmentSnapshot = lower.startsWith(SEGMENT_SNAPSHOT_PREFIX)
+  const snapshot = !segmentSnapshot && managedBy === 'SYSTEM' && rawName.startsWith(SNAPSHOT_PREFIX)
+  const system = !segmentSnapshot && managedBy !== 'CUSTOMER' && SYSTEM_DATASET_NAMES.has(lower)
+  if (managedBy !== 'CUSTOMER' && !snapshot && !segmentSnapshot && !system) return null
   const tags = ds.tags || {}
   const table = tags['adobe/pqs/table']
   const rowCount = ds.extensions?.adobe_lakeHouse?.metrics?.rowCount
@@ -447,7 +481,7 @@ function toExplorerDataset(id, ds) {
   }
   return {
     ...base,
-    kind: 'standard',
+    kind: segmentSnapshot ? 'segmentSnapshot' : system ? 'system' : 'standard',
     profileEnabled: unifiedProfile[0] === 'enabled:true',
     schemaId: ds.schemaRef?.id || null,
   }
@@ -541,7 +575,8 @@ function extractFields(properties) {
  *   { type: 'done', scanned, total }
  *   { type: 'error', error }
  * Pages through Catalog (limit=100) until an empty response, de-duplicates by
- * dataset id, and keeps CUSTOMER-managed datasets plus Profile-Snapshot datasets.
+ * dataset id, and keeps CUSTOMER-managed, Profile-Snapshot, Segmentdefinition-Snapshot
+ * and listed System datasets (see toExplorerDataset).
  * Each merge policy is fetched at most once per request; ids the client already
  * has cached (knownMergePolicyIds) are skipped entirely.
  */

@@ -31,7 +31,7 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 |------|--------------|
 | **Connection** | Two modes — **AEP API** (OAuth server-to-server + sandbox picker) or **Direct Connection** (host / port / database / user / password) |
 | **Credential security** | Uploaded config is verified with Adobe IMS and kept only in an encrypted, HttpOnly session cookie — never in browser storage |
-| **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled* and *Profile Snapshots* (by merge policy) |
+| **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot* |
 | **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
 | **Query editor** | CodeMirror 6 SQL editor with syntax highlighting, autocompletion, and run-selection / run-statement-at-cursor |
 | **Multiple tabs** | Up to 3 independent query tabs, each with its own editor and results |
@@ -176,11 +176,17 @@ Profile Snapshots               SYSTEM datasets named "Profile-Snapshot*"
  │    └── profile_snapshot_export_…   12,345
  └── Gold Customers
       └── profile_snapshot_export_…    6,789
+
+System                          AJO / journey system datasets (fixed list, by name)
+ └── ajo_message_feedback_event_dataset   ← expands to schema fields
+
+Segment Snapshot                datasets named "Segmentdefinition-Snapshot*"
+ └── segmentdefinition_snapshot_abc       ← expands to schema fields
 ```
 
 | What | Source |
 |------|--------|
-| Which datasets appear | `classification.managedBy = "CUSTOMER"`, plus `managedBy = "SYSTEM"` whose name starts with `Profile-Snapshot`. All other system datasets are hidden. |
+| Which datasets appear | `classification.managedBy = "CUSTOMER"`; `managedBy = "SYSTEM"` whose name starts with `Profile-Snapshot`; any dataset whose name starts with `Segmentdefinition-Snapshot` (case-insensitive, shown only under *Segment Snapshot*); and non-customer datasets whose name matches the `SYSTEM_DATASET_NAMES` list in `backend/server.js` (AJO datasets, *Journeys*, *Journey Step Events*). All other system datasets are hidden. |
 | Dataset name | `tags["adobe/pqs/table"]` (the name you query) |
 | Record count | `extensions.adobe_lakeHouse.metrics.rowCount`, formatted `1,234,567` |
 | Profile Enabled | `tags.unifiedProfile[0] = "enabled:true"` |
@@ -190,7 +196,7 @@ Profile Snapshots               SYSTEM datasets named "Profile-Snapshot*"
 
 - All Catalog pages (100 datasets each) are fetched automatically and streamed in as they arrive — the tree is usable before loading finishes. Duplicates are removed.
 - Merge policies are fetched once per ID and cached for the sandbox; refreshes skip ones already known.
-- A dataset's **schema is loaded only when you expand it**, then cached. Datasets sharing a schema reuse it. Profile Snapshot datasets have no schema view and never call the Schema Registry.
+- A dataset's **schema is loaded only when you expand it**, then cached. Datasets sharing a schema reuse it. Profile Snapshot datasets have no schema view and never call the Schema Registry. System and Segment Snapshot datasets expand to their schema fields like customer datasets.
 - The **refresh** button reloads the list while keeping the current tree visible; expanded schemas refresh in the background.
 
 ### Schema fields
@@ -385,6 +391,7 @@ aepQueryBuilder/
 | [DATASET.md](docs/DATASET.md) | Dataset Explorer specification |
 | [DATASET_ENHANCE.md](docs/DATASET_ENHANCE.md) | Array-path copy and scrollable explorer enhancements |
 | [PROFILE_SNAPSHOT.md](docs/PROFILE_SNAPSHOT.md) | Profile Snapshot and merge policy support |
+| [SYSTEM_DATASET.md](docs/SYSTEM_DATASET.md) | System and Segment Snapshot dataset groups |
 | [frontend-vite-template.md](docs/frontend-vite-template.md) | Original Vite + React template notes |
 
 ---
