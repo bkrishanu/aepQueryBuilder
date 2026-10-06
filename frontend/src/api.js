@@ -20,4 +20,11 @@ api.interceptors.response.use(undefined, (err) => {
   return Promise.reject(err)
 })
 
+// Server settings (default Postgres port, result limits) from GET /api/config,
+// fetched once. The backend owns these values; the UI never hard-codes them.
+let configPromise = null
+export const getServerConfig = () => (configPromise ??= api.get('/config')
+  .then(res => res.data)
+  .catch(() => { configPromise = null; return null }))
+
 export default api

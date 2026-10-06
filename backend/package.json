@@ -17,7 +17,8 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.4",
     "express": "^5.2.1",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "pg-cursor": "^2.22.1"
   },
   "devDependencies": {
     "@vercel/node": "^16.0.1",

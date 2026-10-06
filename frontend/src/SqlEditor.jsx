@@ -1,8 +1,8 @@
-import { useRef, useMemo, useLayoutEffect, useImperativeHandle, forwardRef } from 'react'
+import { useRef, useMemo, useEffect, useLayoutEffect, useImperativeHandle, forwardRef } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { sql } from '@codemirror/lang-sql'
-import { EditorView, keymap } from '@codemirror/view'
-import { Prec } from '@codemirror/state'
+import { EditorView, keymap, Decoration, WidgetType } from '@codemirror/view'
+import { Prec, StateField, StateEffect } from '@codemirror/state'
 import { resolveStatements, splitStatements } from './sqlStatements.js'
 
 // ─── DBeaver-inspired light theme (white background) ─────────────────────────
@@ -89,6 +89,24 @@ const dbeaverTheme = EditorView.theme(
 
     // placeholder
     '.cm-placeholder': { color: '#aaaaaa' },
+
+    // SQL error reported by the server (see errorField)
+    '.cm-sqlError': {
+      textDecoration: 'underline wavy #e11d48',
+      textUnderlineOffset: '3px',
+      backgroundColor: 'rgba(225, 29, 72, 0.08)',
+    },
+    '.cm-sqlErrorLine': { backgroundColor: 'rgba(225, 29, 72, 0.05)' },
+    '.cm-sqlErrorMsg': {
+      margin: '2px 0 4px',
+      padding: '3px 8px',
+      borderLeft: '3px solid #e11d48',
+      backgroundColor: '#fff1f2',
+      color: '#be123c',
+      fontSize: '12px',
+      lineHeight: '1.5',
+      whiteSpace: 'pre-wrap',
+    },
   },
   { dark: false }
 )
@@ -135,13 +153,82 @@ const runKeymap = (onRun) => {
   ]))
 }
 
+// ─── server error highlighting ───────────────────────────────────────────────
+// The failing token is underlined, its line tinted and the message shown
+// beneath it. Cleared as soon as the document changes.
+const setErrorEffect = StateEffect.define()
+
+class ErrorMessageWidget extends WidgetType {
+  constructor(message) { super(); this.message = message }
+  eq(other) { return other.message === this.message }
+  toDOM() {
+    const el = document.createElement('div')
+    el.className = 'cm-sqlErrorMsg'
+    el.setAttribute('role', 'alert')
+    el.textContent = this.message
+    return el
+  }
+}
+
+const errorField = StateField.define({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    for (const e of tr.effects) {
+      if (!e.is(setErrorEffect)) continue
+      if (!e.value) return Decoration.none
+      const { from, to, message } = e.value
+      const line = tr.state.doc.lineAt(from)
+      const ranges = [Decoration.line({ class: 'cm-sqlErrorLine' }).range(line.from)]
+      if (to > from) ranges.push(Decoration.mark({ class: 'cm-sqlError', attributes: { title: message } }).range(from, to))
+      ranges.push(Decoration.widget({ widget: new ErrorMessageWidget(message), block: true, side: 1 }).range(line.to))
+      return Decoration.set(ranges, true)
+    }
+    return tr.docChanged ? Decoration.none : deco
+  },
+  provide: f => EditorView.decorations.from(f),
+})
+
+/** [from, to) of the token starting at `pos`: a run of identifier characters, else one character. */
+function tokenAt(doc, pos) {
+  const text = doc.sliceString(pos, Math.min(doc.length, pos + 200))
+  const m = /^[\w$.]+|^"[^"\n]*"?|^'[^'\n]*'?/.exec(text)
+  return [pos, pos + (m ? m[0].length : Math.min(1, text.length))]
+}
+
+// errors whose cursor jump already happened (the jump runs once, not on every remount)
+const jumped = new WeakSet()
+
+/**
+ * Show `error` ({ from, statement, position, message }) in the view: from is the
+ * statement's offset in the document, position Postgres' 1-based offset in it.
+ * Skipped when the statement text has since been edited.
+ */
+function applyError(view, error) {
+  if (!error) {
+    if (view.state.field(errorField).size) view.dispatch({ effects: setErrorEffect.of(null) })
+    return
+  }
+  const { from, statement, position, message } = error
+  const doc = view.state.doc
+  if (doc.sliceString(from, from + statement.length) !== statement) return
+  let pos = from + Math.max(0, Math.min(statement.length, (position || 1) - 1))
+  if (pos >= from + statement.length && pos > from) pos-- // "at end of input" → last character
+  const [tFrom, tTo] = tokenAt(doc, pos)
+  const effects = [setErrorEffect.of({ from: tFrom, to: Math.min(tTo, from + statement.length), message })]
+  if (jumped.has(error)) { view.dispatch({ effects }); return }
+  jumped.add(error)
+  view.dispatch({ effects, selection: { anchor: tFrom }, scrollIntoView: true })
+  view.focus()
+}
+
 // ─── SqlEditor component ──────────────────────────────────────────────────────
 /**
  * Exposes `getStatementsToRun()` via ref (see resolveStatements) so the parent
  * can resolve what to execute. Ctrl+Enter (and Cmd+Enter on macOS) calls
- * `onRun`, the same action as the Run button.
+ * `onRun`, the same action as the Run button. `error` (see applyError) marks
+ * where the server reported a SQL error and moves the cursor there once.
  */
-const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, onRun }, ref) {
+const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, onRun, error }, ref) {
   const cmRef = useRef(null)
   const onRunRef = useRef(onRun)
   useLayoutEffect(() => { onRunRef.current = onRun })
@@ -155,10 +242,20 @@ const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, 
     },
   }))
 
+  // the editor mounts after the error is known (Results → Editor tab), so apply
+  // it both on creation and whenever it changes
+  const errorRef = useRef(error)
+  useLayoutEffect(() => { errorRef.current = error })
+  useEffect(() => {
+    const view = cmRef.current?.view
+    if (view) applyError(view, error)
+  }, [error])
+
   // Stable extensions, so CodeMirror is not reconfigured on every render.
   const extensions = useMemo(() => [
     sql(),
     dbeaverTheme,
+    errorField,
     EditorView.lineWrapping,
     runKeymap(() => onRunRef.current?.()),
   ], [])
@@ -170,6 +267,7 @@ const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, 
       onChange={onChange}
       placeholder={placeholder}
       extensions={extensions}
+      onCreateEditor={view => applyError(view, errorRef.current)}
       theme="none"        // we supply our own theme above
       basicSetup={{
         lineNumbers: true,

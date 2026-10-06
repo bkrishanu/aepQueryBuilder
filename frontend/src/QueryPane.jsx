@@ -1,6 +1,9 @@
-import { useState, useRef, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
+import { useState, useRef, useMemo, useCallback, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
 import api, { isSessionError, notifySessionExpired } from './api.js'
-import { LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square } from 'lucide-react'
+import {
+  LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square,
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, TriangleAlert, X, LocateFixed,
+} from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
 import Btn, { IconBtn } from './Button.jsx'
 import { splitStatements, RUN_SHORTCUT, isQsCancellable, isQueryServiceTarget } from './sqlStatements.js'
@@ -25,16 +28,67 @@ const MAX_VISIBLE_ROWS = 20
 const MAX_VISIBLE_COLS = 5
 const HEADER_H = 40
 const ROW_H    = 36
+// Text cells at least this long open the value viewer on click (they're likely truncated)
+const VIEWER_MIN_CHARS = 40
+const TOOLTIP_MAX_CHARS = 1000
 
-function ResultsTable({ results }) {
+// ─── cell values ──────────────────────────────────────────────────────────────
+const isComplex = (v) => v !== null && typeof v === 'object'
+
+/** One-line text for a cell: objects and arrays as compact JSON, scalars unchanged. */
+function cellText(v) {
+  if (v === null || v === undefined) return ''
+  if (isComplex(v)) {
+    try { return JSON.stringify(v) } catch { return String(v) }
+  }
+  return String(v)
+}
+
+/** Full value for the viewer: JSON pretty-printed, including JSON held in a text column. */
+function prettyValue(v) {
+  if (isComplex(v)) {
+    try { return JSON.stringify(v, null, 2) } catch { return String(v) }
+  }
+  if (typeof v === 'string' && /^\s*[[{]/.test(v)) {
+    try {
+      const parsed = JSON.parse(v)
+      if (isComplex(parsed)) return JSON.stringify(parsed, null, 2)
+    } catch { /* not JSON — show as is */ }
+  }
+  return String(v)
+}
+
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s)
+
+/**
+ * TSV field that pastes back into a single cell (Excel, Google Sheets): values
+ * containing a tab, newline, carriage return or double quote are wrapped in
+ * double quotes with inner quotes doubled.
+ */
+function tsvField(v) {
+  const s = cellText(v)
+  return /[\t\n\r"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+/**
+ * One page of a result set. `rows` are arrays in column order; `columns` are
+ * { name, label } with labels made unique by the server (_id, _id (2)), so
+ * columns that share a name each keep their own values.
+ */
+function ResultsTable({ columns, rows, rowOffset = 0, onOpenCell }) {
   const scrollRef = useRef(null)
   const tableRef  = useRef(null)
   const [viewportH, setViewportH] = useState(null)
 
-  const colCount = results.columns.length
-  const rowCount = results.rows.length
+  const colCount = columns.length
+  const rowCount = rows.length
   const wideMode = colCount > MAX_VISIBLE_COLS
   const tallMode = rowCount > MAX_VISIBLE_ROWS
+
+  // a new page starts at its first row
+  useLayoutEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
+  }, [rows])
 
   // When there are more than 20 rows, size the viewport to exactly header + 20
   // rows, measured from the DOM so borders and any horizontal scrollbar are
@@ -55,7 +109,7 @@ function ResultsTable({ results }) {
     const ro = new ResizeObserver(measure)
     ro.observe(table)
     return () => ro.disconnect()
-  }, [results, tallMode, wideMode])
+  }, [rows, columns, tallMode, wideMode])
 
   // table width as % of the viewport: 100% for ≤5 cols, 20% per column beyond that
   const tableWidthPct = wideMode ? (colCount / MAX_VISIBLE_COLS) * 100 : 100
@@ -77,41 +131,55 @@ function ResultsTable({ results }) {
         style={{ width: `${tableWidthPct}%`, tableLayout: 'fixed' }}
       >
         <colgroup>
-          {results.columns.map((col, ci) => <col key={ci} style={{ width: `${colWidthPct}%` }} />)}
+          {columns.map((col, ci) => <col key={ci} style={{ width: `${colWidthPct}%` }} />)}
         </colgroup>
         <thead>
           <tr>
-            {results.columns.map((col, ci) => (
+            {columns.map((col, ci) => (
               <th
                 key={ci}
-                title={col}
+                title={col.label === col.name ? col.name : `${col.label} — another column is also named "${col.name}"`}
                 className={`sticky top-0 z-10 bg-slate-100 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-600 border-b border-slate-200 whitespace-nowrap overflow-hidden text-ellipsis ${ci < colCount - 1 ? 'border-r border-r-slate-200' : ''}`}
                 style={{ height: `${HEADER_H}px` }}
               >
-                {col}
+                {col.label}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {results.rows.map((row, i) => (
+          {rows.map((row, i) => (
             <tr
-              key={i}
+              key={rowOffset + i}
               className={`group transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'} hover:bg-blue-50/70`}
             >
-              {results.columns.map((col, ci) => {
-                const v = row[col]
+              {columns.map((col, ci) => {
+                const v = row[ci]
                 const isNull = v === null || v === undefined
+                const complex = isComplex(v)
+                const text = cellText(v)
+                const viewable = complex || text.length >= VIEWER_MIN_CHARS
                 return (
                   <td
                     key={ci}
-                    title={isNull ? 'null' : String(v)}
+                    title={isNull ? 'null' : clip(viewable ? prettyValue(v) : text, TOOLTIP_MAX_CHARS)}
                     className={`px-4 text-slate-700 whitespace-nowrap overflow-hidden text-ellipsis ${i < rowCount - 1 ? 'border-b border-slate-100' : ''} ${ci < colCount - 1 ? 'border-r border-r-slate-100' : ''}`}
                     style={{ height: `${ROW_H}px` }}
                   >
                     {isNull
                       ? <span className="text-slate-400 italic text-xs">null</span>
-                      : String(v)}
+                      : viewable
+                        ? (
+                          <button
+                            type="button"
+                            onClick={() => onOpenCell?.({ column: col.label, row: rowOffset + i + 1, value: v })}
+                            aria-label={`View full value of ${col.label}, row ${rowOffset + i + 1}`}
+                            className={`block w-full truncate text-left cursor-zoom-in rounded-sm hover:underline decoration-dotted underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${complex ? 'font-mono text-[12px] text-slate-600' : ''}`}
+                          >
+                            {text}
+                          </button>
+                        )
+                        : text}
                   </td>
                 )
               })}
@@ -124,7 +192,7 @@ function ResultsTable({ results }) {
 }
 
 // ─── result helpers ───────────────────────────────────────────────────────────
-const plural  = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+const plural  = (n, word) => `${n.toLocaleString()} ${word}${n === 1 ? '' : 's'}`
 const oneLine = (sql) => sql.replace(/\s+/g, ' ').trim()
 const preview = (sql) => { const s = oneLine(sql); return s.length > 80 ? `${s.slice(0, 80)}…` : s }
 
@@ -137,7 +205,7 @@ function lineCol(text, pos) {
 /** One-line description of a result set, for headers and the console. */
 function describeSet(set) {
   if (set.status !== 'success') return `${set.duration ?? 0}ms`
-  if (set.columns.length) return `${plural(set.rows.length, 'row')} · ${plural(set.columns.length, 'col')} · ${set.duration}ms`
+  if (set.columns.length) return `${plural(set.rows.length, 'row')}${set.truncated ? ' (limit reached)' : ''} · ${plural(set.columns.length, 'col')} · ${set.duration}ms`
   const affected = set.rowCount != null && set.command !== 'SELECT' ? ` · ${plural(set.rowCount, 'row')} affected` : ''
   return `${set.command || 'Statement'}${affected} · ${set.duration}ms`
 }
@@ -197,8 +265,14 @@ async function streamQuery(endpoint, body, signal, onMessage) {
 // will finish on the server, while the stream is still read in the
 // background so later INSERT INTO / CTAS statements of the run get cancelled.
 //
+// Rows stream in as 'rows' batches (arrays in column order, at most
+// limits.maxRows per result set) and are kept here, so paging through them
+// never re-runs the query; the grid renders one page at a time.
+//
 // results: null
-//        | { sets: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
+//        | { sets: [{ statement, index, status, columns: [{ name, label }], rows: [[…]], rowCount,
+//                    command, duration, truncated?, error?, code?, position? }],
+//            duration, limits: { maxRows, pageSize }, runId }
 //        | { cancelled: true, unconfirmed?: true, detached?: true }
 //        | { error }   — the request itself failed (auth, connection, …)
 const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onRun }, ref) {
@@ -206,8 +280,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   const [results, setResults]     = useState(null)
   const [executing, setExecuting] = useState(false)
   const [startedAt, setStartedAt] = useState(null)
+  const [received, setReceived]   = useState(0)        // rows streamed so far by the running query
   const [activeTab, setActiveTab] = useState('editor') // 'editor' | 'results'
   const [copiedKey, setCopiedKey] = useState(null)     // transient "Copied" feedback per result set
+  const [viewCell, setViewCell]   = useState(null)     // { column, row, value } shown in the value viewer
+  // first SQL error with a position, for the editor: { from, statement, position, message }
+  const [editorError, setEditorError] = useState(null)
   const editorRef  = useRef(null)
   const [cancelling, setCancelling] = useState(false)
   const runRef     = useRef(null)  // { ac, token, cancelRequested, timer } of the run in flight
@@ -313,14 +391,31 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     setExecuting(running)
     setCancelling(false)
     setStartedAt(running ? Date.now() : null)
+    setReceived(0)
     onExecutingChange?.(running ? 'running' : false)
+  }
+
+  // point the editor at the first error the server located in the SQL
+  const locateError = (sets, planned) => {
+    const set = sets.find(s => s.status === 'error' && s.position && planned[s.index])
+    if (!set) return
+    const stmt = planned[set.index]
+    setEditorError({ from: stmt.from, statement: stmt.text, position: set.position, message: set.error })
+  }
+
+  const showErrorInEditor = () => {
+    setEditorError(e => e && { ...e }) // a fresh object makes the editor jump to it again
+    setActiveTab('editor')
   }
 
   const logOutcome = (sets) => {
     sets.forEach((set, i) => {
       const tag = sets.length > 1 ? `Query ${i + 1}` : 'Query'
-      if (set.status === 'success') addLog('info', `${tag} succeeded: ${describeSet(set)}.`)
-      else if (set.status === 'error') addLog('error', `${tag} failed: ${set.error}`)
+      if (set.status === 'success') {
+        addLog('info', `${tag} succeeded: ${describeSet(set)}.`)
+        if (set.truncated) addLog('warn', `${tag}: results limited to the first ${plural(set.rows.length, 'row')} — add a LIMIT or WHERE clause to narrow them.`)
+      }
+      else if (set.status === 'error') addLog('error', `${tag} failed${set.code ? ` [${set.code}]` : ''}: ${set.error}`)
       else if (set.status === 'cancelled') addLog('warn', `${tag} cancelled on the server: ${set.error}`)
       else addLog('warn', `${tag} ${set.error}`)
     })
@@ -338,9 +433,13 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
         isQS: isQueryServiceTarget(endpoint, payload), detached: false,
         current: null,       // { index, startedAt } of the statement running on the server
         cancelRequested: false, cancelIndex: -1, cancelSentFor: null, timer: 0,
+        limits: null,        // { maxRows, pageSize, batchSize } from the server
+        rowsBySeq: [],       // streamed rows per result set
+        received: 0,
       }
       runRef.current = run
       setRunning(true)
+      setEditorError(null)
       addLog('info', statements.length === 1
         ? `Executing: ${preview(statements[0])}`
         : `Executing ${statements.length} selected statements sequentially…`)
@@ -350,7 +449,16 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           if (msg.type === 'started') {
             run.started = true
             run.token = msg.cancelToken
+            run.limits = msg.limits || null
             if (run.cancelRequested && !run.token) run.ac.abort()
+          } else if (msg.type === 'columns') {
+            run.rowsBySeq[msg.seq] = []
+          } else if (msg.type === 'rows') {
+            if (run.detached) return // results of a detached run are discarded
+            const rows = (run.rowsBySeq[msg.seq] ??= [])
+            for (const r of msg.rows) rows.push(r)
+            run.received += msg.rows.length
+            setReceived(run.received)
           } else if (msg.type === 'statement') {
             run.current = { index: msg.index, startedAt: msg.startedAt }
             // Cancel came before this statement was known, or the server moved on
@@ -367,15 +475,22 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           addLog('info', 'The cancelled run has finished on the server; its results were discarded.')
           return
         }
-        let sets = done.results || []
+        // results[seq] is the summary of the rows streamed under that seq
+        let sets = (done.results || []).map((s, seq) => ({
+          ...s,
+          columns: s.columns || [],
+          rows: s.status === 'success' ? (run.rowsBySeq[seq] || []) : [],
+        }))
+        run.rowsBySeq = []
         if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
           // Query Service reports an API cancel as an ordinary error on the statement
-          const at = sets.findIndex((s, i) => i >= run.cancelIndex && s.status === 'error')
+          const at = sets.findIndex(s => s.index >= run.cancelIndex && s.status === 'error')
           if (at >= 0) sets = sets.map((s, i) => i === at ? { ...s, status: 'cancelled' } : s)
         }
-        setResults({ sets, duration: done.duration })
+        setResults({ sets, duration: done.duration, limits: run.limits, runId: Date.now() })
         setActiveTab('results')
         logOutcome(sets)
+        locateError(sets, plan.statements)
         if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
           addLog('warn', 'The query finished before the cancel took effect.')
         }
@@ -400,16 +515,30 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
       }
     },
     cancel: () => requestCancel(runRef.current),
+    // read from the ref, not `executing` state: this handle may have been created
+    // in an earlier render, and state from that render would be stale
+    isExecuting: () => runningRef.current,
   }))
 
+  // Copies every fetched row (not just the visible page) as TSV.
   const handleCopy = (set, key) => {
     const lines = [
-      set.columns.join('\t'),
-      ...set.rows.map(r => set.columns.map(c => r[c] ?? '').join('\t')),
+      set.columns.map(c => tsvField(c.label)).join('\t'),
+      ...set.rows.map(r => r.map(tsvField).join('\t')),
     ]
     navigator.clipboard.writeText(lines.join('\n'))
-    setCopiedKey(key)
-    addLog('info', 'Results copied to clipboard (tab-delimited).')
+      .then(() => {
+        setCopiedKey(key)
+        addLog('info', `${plural(set.rows.length, 'row')} copied to clipboard (tab-delimited).`)
+      })
+      .catch(err => addLog('error', `Copy failed: ${err.message}`))
+  }
+
+  const closeViewer = useCallback(() => setViewCell(null), [])
+
+  const handleQueryChange = (text) => {
+    setQuery(text)
+    setEditorError(null) // positions no longer match once the SQL changes
   }
 
   const sets      = results?.sets
@@ -478,8 +607,9 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
               <SqlEditor
                 ref={editorRef}
                 value={query}
-                onChange={setQuery}
+                onChange={handleQueryChange}
                 onRun={onRun}
+                error={editorError}
                 placeholder="SELECT * FROM your_dataset LIMIT 10;"
               />
               </div>
@@ -493,7 +623,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
             {executing ? (
               <div role="status" className="flex-1 flex flex-col items-center justify-center gap-3">
                 <LoaderCircle size={32} strokeWidth={2} className="animate-spin text-blue-600" />
-                <p className="text-sm text-slate-500">Executing query, please wait… <Elapsed since={startedAt} /></p>
+                <p className="text-sm text-slate-500">
+                  {received > 0 ? 'Loading results…' : 'Executing query, please wait…'} <Elapsed since={startedAt} />
+                </p>
+                {received > 0 && (
+                  <p className="text-xs text-slate-400 tabular-nums">{plural(received, 'row')} received</p>
+                )}
                 <Btn variant="danger" size="sm" icon={Square} iconClassName="fill-current" loading={cancelling} onClick={() => requestCancel(runRef.current)}>
                   {cancelling ? 'Cancelling…' : 'Cancel query'}
                 </Btn>
@@ -515,10 +650,14 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
               <ErrorPanel title="Query failed" message={results.error} />
             ) : sets.length === 1 ? (
               <ResultSet
+                key={results.runId}
                 set={sets[0]}
                 title="Results"
+                pageSize={results.limits?.pageSize}
                 copied={copiedKey === 0}
                 onCopy={() => handleCopy(sets[0], 0)}
+                onOpenCell={setViewCell}
+                onShowError={editorError && sets[0].index === 0 ? showErrorInEditor : undefined}
               />
             ) : (
               <>
@@ -532,12 +671,16 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
                 </p>
                 {sets.map((set, i) => (
                   <ResultSet
-                    key={i}
+                    key={`${results.runId}-${i}`}
                     set={set}
                     title={`Query ${i + 1}`}
                     multi
+                    pageSize={results.limits?.pageSize}
                     copied={copiedKey === i}
                     onCopy={() => handleCopy(set, i)}
+                    onOpenCell={setViewCell}
+                    onShowError={editorError && set.status === 'error' && editorError.statement === set.statement && set.position === editorError.position
+                      ? showErrorInEditor : undefined}
                   />
                 ))}
               </>
@@ -545,9 +688,71 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           </div>
         )}
       </div>
+
+      {viewCell && <CellViewer cell={viewCell} onClose={closeViewer} />}
     </div>
   )
 })
+
+/**
+ * Modal showing a cell's complete value — JSON pretty-printed — with copy.
+ * Closes on Escape, the close button, or a click on the backdrop.
+ */
+function CellViewer({ cell, onClose }) {
+  const [copied, setCopied] = useState(false)
+  const bodyRef = useRef(null)
+  const text = prettyValue(cell.value)
+
+  useEffect(() => {
+    const prev = document.activeElement
+    bodyRef.current?.focus() // arrow keys / PageDown scroll the value
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      prev?.focus?.()
+    }
+  }, [onClose])
+
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1600)
+    return () => clearTimeout(t)
+  }, [copied])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Value of ${cell.column}, row ${cell.row}`}
+        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2.5">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold text-slate-900">{cell.column}</p>
+            <p className="text-[11px] text-slate-400 tabular-nums">Row {cell.row.toLocaleString()} · {text.length.toLocaleString()} characters</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <IconBtn
+              size="sm"
+              icon={copied ? Check : Copy}
+              iconClassName={copied ? 'text-emerald-600' : ''}
+              label={copied ? 'Copied' : 'Copy value'}
+              onClick={() => navigator.clipboard.writeText(text).then(() => setCopied(true)).catch(() => {})}
+              align="end"
+            />
+            <IconBtn size="sm" icon={X} label="Close (Esc)" onClick={onClose} align="end" />
+          </div>
+        </div>
+        <pre ref={bodyRef} tabIndex={0} className="min-h-0 focus:outline-none flex-1 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12px] leading-relaxed text-slate-700">{text}</pre>
+      </div>
+    </div>
+  )
+}
 
 /** Live "1.2s" counter from a start timestamp. */
 function Elapsed({ since }) {
@@ -566,16 +771,28 @@ const STATUS_CHIP = {
   cancelled: { label: 'Cancelled', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
 }
 
+// used until the server reports its page size (QUERY_PAGE_SIZE)
+const FALLBACK_PAGE_SIZE = 100
+
 /**
  * One statement's outcome: header (title, status, stats, copy) and its table,
  * empty state or error. `multi` adds the status chip, the statement text and
  * a card frame so several result sets read as separate blocks.
+ * Rows are shown `pageSize` at a time; paging only slices the rows already
+ * fetched, so it never re-runs the query.
  */
-function ResultSet({ set, title, multi = false, copied, onCopy }) {
+function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, copied, onCopy, onOpenCell, onShowError }) {
+  const [page, setPage] = useState(0)
   const ok      = set.status === 'success'
   const hasCols = ok && set.columns.length > 0
   const chip    = STATUS_CHIP[set.status] || STATUS_CHIP.error
   const where   = !ok && set.position ? lineCol(set.statement, set.position) : null
+
+  const total     = ok ? set.rows.length : 0
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const current   = Math.min(page, pageCount - 1)
+  const first     = current * pageSize
+  const pageRows  = useMemo(() => (ok ? set.rows.slice(first, first + pageSize) : []), [ok, set.rows, first, pageSize])
 
   return (
     <section
@@ -597,9 +814,9 @@ function ResultSet({ set, title, multi = false, copied, onCopy }) {
             size="sm"
             icon={copied ? Check : Copy}
             iconClassName={copied ? 'text-emerald-600' : ''}
-            label={copied ? 'Copied' : 'Copy results (tab-delimited)'}
+            label={copied ? 'Copied' : `Copy all ${plural(total, 'row')} (tab-delimited)`}
             onClick={onCopy}
-            disabled={set.rows.length === 0}
+            disabled={total === 0}
             align="end"
           />
         )}
@@ -611,12 +828,35 @@ function ResultSet({ set, title, multi = false, copied, onCopy }) {
         </code>
       )}
 
-      {ok && set.rows.length > 0 && <ResultsTable results={set} />}
-      {ok && set.rows.length === 0 && (
+      {ok && set.truncated && (
+        <div role="status" className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+          <TriangleAlert size={14} strokeWidth={2.25} className="mt-px shrink-0 text-amber-600" />
+          <span>
+            <span className="font-medium">Maximum result limit reached.</span>{' '}
+            Results limited to the first {plural(total, 'row')} — add a LIMIT or WHERE clause to narrow the query.
+          </span>
+        </div>
+      )}
+
+      {ok && total > 0 && (
+        <ResultsTable columns={set.columns} rows={pageRows} rowOffset={first} onOpenCell={onOpenCell} />
+      )}
+      {ok && total > 0 && (
+        <Pager
+          first={first}
+          shown={pageRows.length}
+          total={total}
+          page={current}
+          pageCount={pageCount}
+          truncated={!!set.truncated}
+          onPage={setPage}
+        />
+      )}
+      {ok && total === 0 && (
         <EmptyState
           compact={multi}
           title="Query executed successfully"
-          text={hasCols ? 'No rows returned.' : describeSet(set)}
+          text={hasCols ? 'No records found.' : describeSet(set)}
           icon={CircleCheck}
         />
       )}
@@ -627,24 +867,53 @@ function ResultSet({ set, title, multi = false, copied, onCopy }) {
             : set.status === 'cancelled' ? 'Cancelled on the server'
             : where ? `Failed at line ${where.line}, column ${where.col}` : 'Statement failed'}
           message={set.error}
+          code={set.status === 'error' ? set.code : undefined}
           hint={set.hint}
+          action={onShowError && (
+            <Btn variant="secondary" size="sm" icon={LocateFixed} onClick={onShowError}>Show in editor</Btn>
+          )}
         />
       )}
     </section>
   )
 }
 
-function ErrorPanel({ title, message, hint, tone = 'error' }) {
+/** "Showing rows 101–200 of 10,000" with first / previous / next / last page controls. */
+function Pager({ first, shown, total, page, pageCount, truncated, onPage }) {
+  const range = pageCount === 1
+    ? `Showing all ${plural(total, 'row')}`
+    : `Showing rows ${(first + 1).toLocaleString()}–${(first + shown).toLocaleString()} of ${total.toLocaleString()}${truncated ? '+' : ''}`
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+      <span className="tabular-nums" aria-live="polite">{range}</span>
+      {pageCount > 1 && (
+        <nav aria-label="Result pages" className="flex items-center gap-1">
+          <IconBtn size="sm" variant="ghost" icon={ChevronsLeft}  label="First page"    onClick={() => onPage(0)}             disabled={page === 0} />
+          <IconBtn size="sm" variant="ghost" icon={ChevronLeft}   label="Previous page" onClick={() => onPage(page - 1)}      disabled={page === 0} />
+          <span className="px-1.5 tabular-nums">Page {(page + 1).toLocaleString()} of {pageCount.toLocaleString()}</span>
+          <IconBtn size="sm" variant="ghost" icon={ChevronRight}  label="Next page"     onClick={() => onPage(page + 1)}      disabled={page >= pageCount - 1} align="end" />
+          <IconBtn size="sm" variant="ghost" icon={ChevronsRight} label="Last page"     onClick={() => onPage(pageCount - 1)} disabled={page >= pageCount - 1} align="end" />
+        </nav>
+      )}
+    </div>
+  )
+}
+
+function ErrorPanel({ title, message, code, hint, action, tone = 'error' }) {
   const warn = tone === 'warn'
   return (
     <div role="alert" className={`rounded-lg border px-4 py-3 text-sm ${warn ? 'border-amber-200 bg-amber-50/70' : 'border-rose-200 bg-rose-50/70'}`}>
       <div className="flex items-start gap-2.5">
         <CircleAlert size={16} strokeWidth={2.25} className={`mt-0.5 shrink-0 ${warn ? 'text-amber-600' : 'text-rose-600'}`} />
-        <div className="min-w-0">
-          <p className={`font-medium ${warn ? 'text-amber-800' : 'text-rose-800'}`}>{title}</p>
+        <div className="min-w-0 flex-1">
+          <p className={`font-medium ${warn ? 'text-amber-800' : 'text-rose-800'}`}>
+            {title}
+            {code && <span className="ml-2 font-mono text-[11px] font-normal text-rose-500">SQLSTATE {code}</span>}
+          </p>
           <p className={`mt-0.5 font-mono text-[12px] whitespace-pre-wrap break-words ${warn ? 'text-amber-700' : 'text-rose-700'}`}>{message}</p>
           {hint && <p className="mt-1 text-xs text-rose-600">Hint: {hint}</p>}
         </div>
+        {action && <div className="shrink-0">{action}</div>}
       </div>
     </div>
   )

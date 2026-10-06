@@ -3,7 +3,7 @@ import {
   SlidersHorizontal, Upload, ShieldCheck, Layers, Plug, Unplug, ChevronDown,
   SquareTerminal, Plus, X, Play, Square, Eraser,
 } from 'lucide-react'
-import api, { SESSION_EXPIRED } from './api.js'
+import api, { SESSION_EXPIRED, getServerConfig } from './api.js'
 import QueryPane from './QueryPane.jsx'
 import DatasetExplorer from './DatasetExplorer.jsx'
 import Btn, { IconBtn } from './Button.jsx'
@@ -11,8 +11,6 @@ import { isRunShortcut, RUN_SHORTCUT, RUN_SHORTCUT_ARIA } from './sqlStatements.
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
-
-const DEFAULT_DIRECT_PORT = '80'
 
 // Parses a Postgres connect string into { host, port, dbName, user, password, sslmode }.
 // Accepts the libpq key=value form — optionally wrapped as `psql "…"`, as AEP's
@@ -193,7 +191,11 @@ export default function App() {
 
   // Direct mode state
   const [directHost, setDirectHost]       = useState('')
-  const [directPort, setDirectPort]       = useState(DEFAULT_DIRECT_PORT)
+  const [directPort, setDirectPort]       = useState('')
+  // Port used when the field is left blank — owned by the backend (GET /api/config)
+  // so a blank port means the same thing in the UI and on the server.
+  const [defaultPort, setDefaultPort]     = useState('')
+  const shownPort = directPort.trim() || defaultPort
   const [directDb, setDirectDb]           = useState('')
   const [directUser, setDirectUser]       = useState('')
   const [directPwd, setDirectPwd]         = useState('')
@@ -243,12 +245,13 @@ export default function App() {
     api.get('/session')
       .then(res => { setSession(res.data); setOrg(res.data.IMS_ORG || '') })
       .catch(() => { /* no active session */ })
+    getServerConfig().then(cfg => { if (cfg?.defaultPort) setDefaultPort(String(cfg.defaultPort)) })
     const storedDirect = sessionStorage.getItem('direct_conn')
     if (storedDirect) {
       try {
         const d = JSON.parse(storedDirect)
         setDirectHost(d.host || '')
-        setDirectPort(d.port || DEFAULT_DIRECT_PORT)
+        setDirectPort(d.port || '')
         setDirectDb(d.dbName || '')
         setDirectUser(d.user || '')
         // password is intentionally NOT restored from storage
@@ -367,7 +370,7 @@ export default function App() {
     setConnStatus('connecting')
 
     if (connMode === 'direct') {
-      addLog('info', `Connecting directly to ${directHost}:${directPort}/${directDb}…`)
+      addLog('info', `Connecting directly to ${directHost}:${shownPort}/${directDb}…`)
       // persist non-sensitive direct fields
       sessionStorage.setItem('direct_conn', JSON.stringify({
         host: directHost, port: directPort, dbName: directDb, user: directUser,
@@ -429,7 +432,8 @@ export default function App() {
     const pane = panes[activePane]
     if (!pane) return
     const paneRef = paneRefs.current[pane.id]
-    if (!paneRef || runningPanes[pane.id]) return // already running — no double execution
+    // isExecuting() reads the pane's live ref — runningPanes state can lag a fast double Ctrl+Enter
+    if (!paneRef || paneRef.isExecuting()) return // already running — no double execution
     const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
     const payload  = connMode === 'direct'
       ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd }
@@ -440,7 +444,8 @@ export default function App() {
   // ── cancel the active pane's running query ───────────────────────────────
   const handleCancel = () => {
     const pane = panes[activePane]
-    if (pane && runningPanes[pane.id]) paneRefs.current[pane.id]?.cancel()
+    const paneRef = pane && paneRefs.current[pane.id]
+    if (paneRef?.isExecuting()) paneRef.cancel()
   }
 
   const cancelAllQueries = () => {
@@ -527,7 +532,7 @@ export default function App() {
             className={configOpen ? 'mb-5' : 'mb-0'}
             subtitle={
               connStatus === 'connected'
-                ? `Connected · ${connMode === 'direct' ? `${directHost}:${directPort}/${directDb}` : `${selectedSandbox}${tenant ? ` · ${tenant}` : ''}`}`
+                ? `Connected · ${connMode === 'direct' ? `${directHost}:${shownPort}/${directDb}` : `${selectedSandbox}${tenant ? ` · ${tenant}` : ''}`}`
                 : connMode === 'aep' ? 'Authenticate with AEP API credentials and pick a sandbox' : 'Connect with raw database parameters'
             }
             icon={<SlidersHorizontal size={16} strokeWidth={2.25} />}
@@ -734,7 +739,7 @@ export default function App() {
                   type="text"
                   value={directPort}
                   onChange={e => setDirectPort(e.target.value)}
-                  placeholder={DEFAULT_DIRECT_PORT}
+                  placeholder={defaultPort}
                   disabled={connStatus === 'connected'}
                   className={inputCls}
                 />

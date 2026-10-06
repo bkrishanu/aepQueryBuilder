@@ -5,7 +5,8 @@ const tls = require('tls')
 const express = require('express')
 const cors = require('cors')
 const axios = require('axios')
-const { Client } = require('pg')
+const { Client, Query } = require('pg')
+const Cursor = require('pg-cursor')
 
 const app = express()
 app.use(cors())
@@ -180,6 +181,39 @@ function tenantFromHost(host) {
 const PG_CONNECT_TIMEOUT_MS = 15000
 const MAX_STATEMENTS = 100
 
+/** Positive integer from an environment variable, else `fallback`. */
+const envInt = (name, fallback) => {
+  const n = parseInt(process.env[name], 10)
+  return Number.isInteger(n) && n > 0 ? n : fallback
+}
+
+// Single source of truth for the port used when none is given. The UI reads it
+// from GET /api/config, so a blank port field behaves the same everywhere.
+// Query Service listens on 80; set PG_DEFAULT_PORT=5432 for plain Postgres.
+const DEFAULT_PG_PORT = envInt('PG_DEFAULT_PORT', 80)
+const resolvePort = (port) => parseInt(port, 10) || DEFAULT_PG_PORT
+
+// Result limits. Rows are read through a cursor CURSOR_BATCH_SIZE at a time and
+// streamed straight to the browser, so the server never holds more than one
+// batch; at most MAX_ROWS rows are returned per result set. PAGE_SIZE is how
+// many rows the results grid shows per page.
+const QUERY_LIMITS = {
+  maxRows:   envInt('QUERY_MAX_ROWS', 10000),
+  pageSize:  envInt('QUERY_PAGE_SIZE', 100),
+  batchSize: envInt('QUERY_CURSOR_BATCH_SIZE', 500),
+}
+// QUERY_USE_CURSOR=false streams every statement over the simple query protocol
+// instead (Query Service always is — see isQueryServiceHost).
+const USE_CURSOR = !/^(0|false|no|off)$/i.test(process.env.QUERY_USE_CURSOR || '')
+
+/**
+ * GET /api/config → { defaultPort, limits: { maxRows, pageSize, batchSize } }
+ * Non-secret settings the UI needs so it never hard-codes its own copies.
+ */
+app.get('/api/config', (req, res) => {
+  res.json({ defaultPort: DEFAULT_PG_PORT, limits: QUERY_LIMITS })
+})
+
 class QueryCancelledError extends Error {
   constructor() {
     super('Query cancelled.')
@@ -205,7 +239,7 @@ function sendCancelRequest({ host, port }, processID, secretKey) {
   sslRequest.writeInt32BE(80877103, 4) // SSLRequest code
 
   return new Promise(resolve => {
-    const sock = net.connect(parseInt(port, 10) || 5432, host)
+    const sock = net.connect(resolvePort(port), host)
     let done = false
     let sent = false
     const finish = () => { if (!done) { done = true; sock.destroy(); resolve(sent) } }
@@ -230,7 +264,7 @@ function sendCancelRequest({ host, port }, processID, secretKey) {
 async function withPgClient({ host, port, database, user, password }, fn, signal, onConnected) {
   const client = new Client({
     host,
-    port: parseInt(port, 10) || 5432,
+    port: resolvePort(port),
     database,
     user,
     password: password || '',
@@ -282,62 +316,292 @@ function statementsFromBody({ queries, query }) {
   return stmts.length ? stmts : null
 }
 
-/** Postgres error → { error, code?, position?, hint?, detail? } for the client. */
+// SQLSTATE classes caused by the query itself (syntax, unknown table/column,
+// bad data, unsupported feature, …) → HTTP 400. Everything else — connection
+// (08), resources (53), operator intervention (57), system (58), internal (XX),
+// or a non-Postgres exception — is a server-side failure → HTTP 500.
+const USER_ERROR_CLASSES = new Set(['0A', '21', '22', '23', '26', '2B', '2F', '34', '3D', '3F', '42', '44', 'P0'])
+
+/** HTTP status that describes an error: 400 for a problem with the user's SQL, else 500. */
+function errorHttpStatus(err) {
+  const code = typeof err?.code === 'string' ? err.code : ''
+  if (USER_ERROR_CLASSES.has(code.slice(0, 2))) return 400
+  // Query Service reports many user errors as XX000, but only those point at a position
+  if (err?.position) return 400
+  return 500
+}
+
+/** Postgres error → { error, code?, position?, hint?, detail?, httpStatus } for the client. */
 function pgErrorInfo(err) {
   const info = { error: err.message || String(err) }
   if (err.code) info.code = err.code
   if (err.position) info.position = parseInt(err.position, 10)
   if (err.hint) info.hint = err.hint
   if (err.detail) info.detail = err.detail
+  info.httpStatus = errorHttpStatus(err)
   return info
 }
 
 /**
- * Run statements one at a time on a single connection. A failing statement is
- * reported and execution continues with the next one; if the connection itself
- * is lost, the remaining statements are reported as skipped. A statement that
- * yields several result sets (pg returns an array) produces one entry each.
+ * pg field descriptions → [{ name, label, dataTypeID }]. Rows travel as arrays
+ * (rowMode 'array'), so columns that share a name (`SELECT w._id, m._id …`)
+ * keep their own values; `label` makes repeated names distinct for display:
+ * _id, _id (2), _id (3) — skipping any label a real column already uses.
+ */
+function describeColumns(fields) {
+  const taken = new Set(fields.map(f => f.name))
+  const seen = new Map()
+  return fields.map(f => {
+    const n = (seen.get(f.name) || 0) + 1
+    seen.set(f.name, n)
+    let label = f.name
+    if (n > 1) {
+      let k = n
+      while (taken.has(label = `${f.name} (${k})`)) k++
+      taken.add(label)
+    }
+    return { name: f.name, label, dataTypeID: f.dataTypeID }
+  })
+}
+
+/** JSON-safe cell value: bytea Buffers become Postgres hex text (\x…). */
+const toJsonValue = (v) => (Buffer.isBuffer(v) ? `\\x${v.toString('hex')}` : v)
+const toJsonRow = (row) => (row.some(Buffer.isBuffer) ? row.map(toJsonValue) : row)
+
+/**
+ * A pg-cursor whose buffer for one read() never exceeds `cap` rows. A server
+ * that ignores the Execute row limit (and sends the whole result at once) then
+ * still cannot push more than maxRows + 1 rows into memory; the extra rows are
+ * dropped and the result is reported as truncated.
+ */
+class BoundedCursor extends Cursor {
+  constructor(text, cap) {
+    super(text, null, { rowMode: 'array' })
+    this.cap = cap
+    this.overflow = false
+  }
+
+  handleDataRow(msg) {
+    if (this._rows.length >= this.cap) { this.overflow = true; return }
+    super.handleDataRow(msg)
+  }
+}
+
+// The extended protocol (which cursors use) accepts one statement per query string.
+const isMultiCommandError = (err) => /cannot insert multiple commands into a prepared statement/i.test(err?.message || '')
+// A server without cursor (portal) support rejects the protocol, not the SQL — nothing ran yet.
+const isCursorUnsupported = (err) => err?.code === '0A000' || err?.code === '08P01' || isMultiCommandError(err)
+
+/**
+ * Run one statement through a cursor, streaming its rows in batches.
+ * onColumns(columns) fires once the result shape is known; onRows(rows) gets
+ * each batch (awaited, so a slow browser throttles the database read).
+ * Resolves { command, rowCount, truncated } or rejects with the pg
+ * error; `opened` on the error tells whether its result set was already announced.
+ */
+async function runWithCursor(client, statement, { maxRows, batchSize }, onColumns, onRows) {
+  const cursor = client.query(new BoundedCursor(statement, maxRows + 1))
+  let returned = 0
+  let truncated = false
+  let opened = false
+  try {
+    for (;;) {
+      const want = Math.min(batchSize, maxRows + 1 - returned)
+      let rows = await cursor.read(want)
+      if (!opened && cursor._result.fields.length) {
+        opened = true
+        await onColumns(describeColumns(cursor._result.fields))
+      }
+      if (cursor.overflow || returned + rows.length > maxRows) {
+        truncated = true
+        rows = rows.slice(0, maxRows - returned)
+      }
+      if (rows.length) {
+        returned += rows.length
+        await onRows(rows.map(toJsonRow))
+      }
+      if (truncated || rows.length < want) break
+    }
+    if (truncated) await cursor.close() // stops the server producing more rows
+  } catch (err) {
+    err.opened = opened
+    throw err
+  }
+  const r = cursor._result
+  return {
+    command: r.command || null,
+    // CommandComplete after a batched read counts only the last batch, so a
+    // result set's size is what was read; other commands report their own count
+    rowCount: opened ? returned : typeof r.rowCount === 'number' ? r.rowCount : null,
+    truncated,
+  }
+}
+
+/**
+ * Simple-protocol query that announces each result set as it starts
+ * ('resultSet' with the pg Result): at its RowDescription, or — for a command
+ * without rows (INSERT, SET, …) — at its CommandComplete. With a 'row'
+ * listener attached, pg hands rows over one by one and keeps none of them.
+ */
+class StreamingQuery extends Query {
+  handleRowDescription(msg) {
+    super.handleRowDescription(msg)
+    this.emit('resultSet', this._result)
+  }
+
+  handleCommandComplete(msg, connection) {
+    super.handleCommandComplete(msg, connection)
+    if (!this._result.fields.length) this.emit('resultSet', this._result)
+  }
+}
+
+/**
+ * Run one statement over the simple query protocol, streaming its rows in
+ * batches. Used for Query Service (which mishandles cursor fetches) and for
+ * strings holding several statements. Only the current batch is held; rows
+ * past maxRows are read and dropped (Query Service can't stop a SELECT), and
+ * the socket is paused while the browser catches up.
+ * onSet(columns) → { seq, wait } announces a result set; onRows(seq, rows) → wait?
+ * Resolves [{ seq, command, rowCount, truncated }] or rejects with the pg error
+ * (`opened` tells whether a result set was already announced).
+ */
+function runStreamed(client, statement, { maxRows, batchSize }, onSet, onRows) {
+  return new Promise((resolve, reject) => {
+    const stream = client.connection.stream
+    let paused = 0
+    const gate = (wait) => {
+      if (!wait) return
+      if (paused++ === 0) stream.pause()
+      wait.then(() => { if (--paused === 0) stream.resume() })
+    }
+    const sets = new Map() // pg Result → { seq, returned, truncated, batch }
+    let current = null
+    const flush = (s) => {
+      if (!s?.batch.length) return
+      const rows = s.batch
+      s.batch = []
+      gate(onRows(s.seq, rows))
+    }
+
+    const q = new StreamingQuery({ text: statement, rowMode: 'array' })
+    q.on('resultSet', (result) => {
+      flush(current)
+      const { seq, wait } = onSet(describeColumns(result.fields))
+      gate(wait)
+      current = { result, seq, returned: 0, truncated: false, batch: [] }
+      sets.set(result, current)
+    })
+    q.on('row', (row, result) => {
+      const s = sets.get(result)
+      if (s.returned >= maxRows) { s.truncated = true; return }
+      s.returned++
+      s.batch.push(toJsonRow(row))
+      if (s.batch.length >= batchSize) flush(s)
+    })
+    q.on('error', (err) => {
+      err.opened = sets.size > 0
+      reject(err)
+    })
+    q.on('end', () => {
+      flush(current)
+      resolve([...sets.values()].map(({ result, seq, returned, truncated }) => ({
+        seq,
+        command: result.command || null,
+        rowCount: result.fields.length ? returned : typeof result.rowCount === 'number' ? result.rowCount : null,
+        truncated,
+      })))
+    })
+    client.query(q)
+  })
+}
+
+// Query Service accepts the extended protocol but answers a cursor's partial
+// fetch as if the query were complete, then keeps sending rows — pg drops the
+// connection ("Received unexpected dataRow message from backend").
+const isQueryServiceHost = (host) => /\.adobe\.io$/i.test(String(host || '').trim())
+
+/**
+ * Run statements one at a time on a single connection, streaming results
+ * through `emit` (see executeQueryRequest for the messages). A failing
+ * statement is reported and execution continues with the next one; if the
+ * connection itself is lost, the remaining statements are reported as skipped.
+ * A statement that yields several result sets produces one entry each.
  * A statement cancelled through /api/query/cancel ends the run: it is reported
  * as 'cancelled' and the remaining statements as skipped.
- * Returns [{ statement, status: 'success'|'error'|'cancelled'|'skipped', columns, rows,
- *            rowCount, command, duration, error?, … }]
+ * Rows are read through a cursor when `useCursor`, else streamed over the
+ * simple protocol (runStreamed).
+ * Returns the result summaries, without rows:
+ *   [{ statement, index, status: 'success'|'error'|'cancelled'|'skipped', columns, rowCount,
+ *      command, duration, truncated?, error?, code?, position?, httpStatus? }]
+ * Entry `seq` of the array is the result set the 'columns' / 'rows' messages
+ * with that seq belong to.
  */
-async function runStatements(client, statements, signal, onStatement) {
+async function runStatements(client, statements, signal, emit, limits, useCursor) {
   let lost = false
   client.on('end', () => { lost = true })
   const results = []
   for (const [i, statement] of statements.entries()) {
     if (signal?.aborted) throw new QueryCancelledError()
     if (lost) {
-      results.push({ statement, status: 'skipped', error: 'Skipped — the database connection was lost.' })
+      results.push({ statement, index: i, status: 'skipped', error: 'Skipped — the database connection was lost.' })
       continue
     }
     const t0 = Date.now()
-    onStatement?.(i, t0)
+    await emit({ type: 'statement', index: i, startedAt: t0 })
+    let entry = null // summary of the result set being streamed
+    const open = (columns) => {
+      entry = { statement, index: i, status: 'success', columns, rowCount: null, command: null }
+      const seq = results.push(entry) - 1
+      return { seq, wait: emit({ type: 'columns', seq, index: i, columns }) }
+    }
     try {
-      const out = await client.query(statement)
-      const duration = Date.now() - t0
-      for (const r of Array.isArray(out) ? out : [out]) {
-        results.push({
-          statement,
-          status: 'success',
-          command: r.command || null,
-          rowCount: typeof r.rowCount === 'number' ? r.rowCount : null,
-          columns: (r.fields || []).map(f => f.name),
-          rows: r.rows || [],
-          duration,
-        })
+      let done = false
+      if (useCursor) {
+        try {
+          let seq = -1
+          const r = await runWithCursor(client, statement, limits,
+            async (columns) => { const o = open(columns); seq = o.seq; await o.wait },
+            (rows) => emit({ type: 'rows', seq, rows }))
+          if (!entry) await open([]).wait // no result set (INSERT, SET, …)
+          Object.assign(entry, {
+            command: r.command,
+            rowCount: r.rowCount,
+            truncated: r.truncated || undefined,
+            duration: Date.now() - t0,
+          })
+          done = true
+        } catch (err) {
+          if (err.opened || signal?.aborted || !isCursorUnsupported(err)) throw err
+          // nothing ran: retry without a cursor — and, when the server rejected
+          // the protocol itself, skip cursors for the rest of the run
+          if (!isMultiCommandError(err)) useCursor = false
+        }
+      }
+      if (!done) {
+        const sets = await runStreamed(client, statement, limits, open, (seq, rows) => emit({ type: 'rows', seq, rows }))
+        const duration = Date.now() - t0
+        if (!sets.length) await open([]).wait // e.g. a statement that is only a comment
+        for (const s of sets) {
+          Object.assign(results[s.seq], { command: s.command, rowCount: s.rowCount, truncated: s.truncated || undefined, duration })
+        }
+        if (!sets.length) entry.duration = duration
       }
     } catch (err) {
       if (signal?.aborted) throw new QueryCancelledError()
+      // a result set that fails part-way through keeps its slot, now as the failure
+      const failed = (status) => {
+        const info = { statement, index: i, status, duration: Date.now() - t0, columns: [], rowCount: null, command: null, ...pgErrorInfo(err) }
+        if (entry && err.opened) Object.assign(entry, info)
+        else results.push(info)
+      }
       if (isUserCancel(err)) {
         // cancelled via /api/query/cancel: report it and run nothing further
-        results.push({ statement, status: 'cancelled', duration: Date.now() - t0, ...pgErrorInfo(err) })
+        failed('cancelled')
         const rest = statements.slice(i + 1)
-        for (const s of rest) results.push({ statement: s, status: 'skipped', error: 'Skipped — the run was cancelled.' })
+        rest.forEach((s, k) => results.push({ statement: s, index: i + 1 + k, status: 'skipped', error: 'Skipped — the run was cancelled.' }))
         break
       }
-      results.push({ statement, status: 'error', duration: Date.now() - t0, ...pgErrorInfo(err) })
+      failed('error')
     }
   }
   return results
@@ -351,11 +615,22 @@ const CANCEL_TOKEN_TTL_MS = 6 * 60 * 60 * 1000
 
 /**
  * Shared body of /api/query and /api/query/direct. Streams newline-delimited JSON:
- *   { type: 'started', cancelToken }   — once connected; cancelToken is null when
- *                                        no SESSION_SECRET is configured
- *   { type: 'statement', index, startedAt } — before each statement runs
- *   { type: 'done', results, duration }
- *   { type: 'error', error }           — the run could not start (auth, connection, …)
+ *   { type: 'started', cancelToken, limits }  — once connected; cancelToken is null
+ *                                        when no SESSION_SECRET is configured;
+ *                                        limits = { maxRows, pageSize, batchSize }
+ *   { type: 'statement', index, startedAt }   — before each statement runs
+ *   { type: 'columns', seq, index, columns }  — result set `seq` of statement `index`
+ *                                        opens; columns = [{ name, label, dataTypeID }]
+ *   { type: 'rows', seq, rows }               — a batch of rows (arrays, in column order)
+ *   { type: 'done', results, duration }       — results = summaries without rows
+ *                                        (see runStatements); results[seq] ↔ seq
+ *   { type: 'error', error, httpStatus }      — the run could not start (auth, connection, …)
+ * The HTTP status is committed (200) before any SQL runs, so a statement's
+ * failure is reported in its result: status 'error' with the Postgres code,
+ * position and httpStatus (400 for errors in the SQL, 500 for server-side ones).
+ * Rows are read in batches (a cursor on Postgres, a streamed simple query on
+ * Query Service) and written as they arrive, waiting for the socket to drain —
+ * the server holds one batch at a time, never the result.
  * The cancel token lets any server instance cancel this run through
  * /api/query/cancel — on serverless hosts the browser dropping the request is
  * not reliably reported to the function that is running the query.
@@ -366,7 +641,17 @@ async function executeQueryRequest(res, statements, signal, getPgConfig, cancelC
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('X-Accel-Buffering', 'no')
-  const send = (obj) => { if (!res.writableEnded) res.write(JSON.stringify(obj) + '\n') }
+  // resolves once the line is flushed (or the browser has gone), so a large
+  // result is never buffered in memory faster than the client reads it
+  const send = (obj) => {
+    if (res.writableEnded || res.destroyed) return
+    if (res.write(JSON.stringify(obj) + '\n')) return
+    return new Promise(resolve => {
+      const done = () => { res.off('drain', done); res.off('close', done); resolve() }
+      res.once('drain', done)
+      res.once('close', done)
+    })
+  }
   try {
     const pgConfig = await getPgConfig()
     const onConnected = (client) => {
@@ -376,14 +661,19 @@ async function executeQueryRequest(res, statements, signal, getPgConfig, cancelC
         cancelToken: canCancel
           ? seal({ ...cancelContext, host: pgConfig.host, port: pgConfig.port, pid: client.processID, key: client.secretKey, exp: Date.now() + CANCEL_TOKEN_TTL_MS }, CANCEL_AAD)
           : null,
+        limits: QUERY_LIMITS,
       })
     }
-    const onStatement = (index, startedAt) => send({ type: 'statement', index, startedAt })
-    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal, onStatement), signal, onConnected)
-    send({ type: 'done', results, duration: Date.now() - t0 })
+    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal, send, QUERY_LIMITS, USE_CURSOR && !isQueryServiceHost(pgConfig.host)), signal, onConnected)
+    await send({ type: 'done', results, duration: Date.now() - t0 })
   } catch (err) {
     if (!(signal.aborted || err.cancelled)) {
-      send({ type: 'error', error: err.response?.data?.title || err.response?.data?.message || err.message })
+      send({
+        type: 'error',
+        // a refused connection is an AggregateError (one per address tried) with an empty message
+        error: err.response?.data?.title || err.response?.data?.message || err.message || err.errors?.[0]?.message || err.code || String(err),
+        httpStatus: err.response?.status || errorHttpStatus(err),
+      })
     }
   }
   res.end()
@@ -500,8 +790,9 @@ app.post('/api/connect', requireSession, async (req, res) => {
  * POST /api/query
  * Body: { SANDBOX_NAME, queries: [sql, …] } (or a single `query` string) —
  * credentials come from the session cookie.
- * Streams NDJSON (see executeQueryRequest); the final 'done' message carries
- *   { results: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
+ * Streams NDJSON (see executeQueryRequest): rows arrive in 'rows' batches and
+ * the final 'done' message carries the per-result-set summaries
+ *   { results: [{ statement, status, columns, rowCount, command, duration, truncated?, error? }], duration }
  * Statements run sequentially on one connection; cancel through /api/query/cancel.
  */
 app.post('/api/query', requireSession, async (req, res) => {

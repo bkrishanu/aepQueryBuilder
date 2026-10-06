@@ -33,10 +33,10 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 | **Credential security** | Uploaded config is verified with Adobe IMS and kept only in an encrypted, HttpOnly session cookie — never in browser storage |
 | **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot*; collapses to a slim rail to give the editor more room |
 | **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
-| **Query editor** | CodeMirror 6 SQL editor with syntax highlighting and autocompletion; runs the statement under the cursor or every selected statement; **Ctrl+Enter** to run; fills the window height |
+| **Query editor** | CodeMirror 6 SQL editor with syntax highlighting and autocompletion; runs the statement under the cursor or every selected statement; **Ctrl+Enter** to run; underlines the token a SQL error points at; fills the window height |
 | **Query control** | Compact icon Run / Cancel buttons with tooltips; Cancel stops the statement on the server where the database allows it (see [Cancelling](#query-results)) |
 | **Multiple tabs** | Up to 5 independent query tabs, each with its own editor and results |
-| **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; sticky headers, 20-row × 5-column viewport with scrolling, one-click tab-delimited copy for Excel / Sheets |
+| **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; pages of 100 rows (up to 10,000 per result set, streamed in batches); duplicate column names kept apart (`_id`, `_id (2)`); JSON / array values shown as JSON with a full-value viewer; sticky headers, 20-row × 5-column viewport; one-click tab-delimited copy for Excel / Sheets |
 | **Reliability** | Every Postgres connection is closed on success, error, timeout or cancel — failed queries don't leak Query Service connection slots |
 | **Console** | Timestamped activity log for every connection, query and explorer action |
 
@@ -87,6 +87,16 @@ cp backend/.env.example backend/.env
 # generate a value and paste it into backend/.env as SESSION_SECRET=...
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 ```
+
+`backend/.env` also accepts these optional settings:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PG_DEFAULT_PORT` | `80` | Port used when a connection gives none (Query Service listens on 80; use 5432 for plain Postgres) |
+| `QUERY_MAX_ROWS` | `10000` | Rows returned per result set; the rest are not fetched |
+| `QUERY_PAGE_SIZE` | `100` | Rows per page in the results grid |
+| `QUERY_CURSOR_BATCH_SIZE` | `500` | Rows read from the database per cursor fetch |
+| `QUERY_USE_CURSOR` | `true` | `false` streams every statement over the simple query protocol instead of a cursor (Query Service never uses cursors) |
 
 ### 3. Run
 
@@ -148,7 +158,7 @@ Connect straight to any Postgres-compatible endpoint (including the AEP Query Se
 | Field | Example | Notes |
 |-------|---------|-------|
 | Host | `acme.platform-query.adobe.io` | Required |
-| Port | `5432` | Defaults to 5432 |
+| Port | `80` | Blank uses the backend default (`PG_DEFAULT_PORT`, 80) |
 | Database | `prod:all` | Required |
 | User | `ABC123@AdobeOrg` | Required |
 | Password | `••••••` | Never persisted — re-enter each session |
@@ -368,27 +378,31 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 |--------|----------|------|--------|
 | `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verifies connectivity |
 | `POST` | `/api/query/direct` | same + `queries` (array) or `query` | NDJSON stream — see [Query results](#query-results) |
+| `GET` | `/api/config` | — | `{ defaultPort, limits: { maxRows, pageSize, batchSize } }` |
 | `POST` | `/api/query/cancel` | `token` (from `started`), `statement`, `startedAt` (from `statement`) | Postgres CancelRequest, plus a Query Service API cancel in AEP mode; `{ sent, api }` |
 
 ### Query results
 
-Statements run one after another on a single connection, which is always closed afterwards (success, error or cancel). The response is newline-delimited JSON:
+Statements run one after another on a single connection, which is always closed afterwards (success, error or cancel). Rows are read `QUERY_CURSOR_BATCH_SIZE` at a time — through a cursor (`pg-cursor`) on PostgreSQL, and as a streamed simple query on Query Service (`*.adobe.io`), which mishandles cursor fetches — and written to the response as they arrive, so the backend holds one batch, never the whole result. Each result set stops at `QUERY_MAX_ROWS`; the browser keeps those rows and pages through them without re-running the query. The response is newline-delimited JSON:
 
 ```js
-{ type: 'started', cancelToken }    // connected; token is null without SESSION_SECRET
-{ type: 'statement', index, startedAt } // before each statement runs
-{ type: 'done', results, duration } // the run finished
-{ type: 'error', error }            // the run never started (auth, connection parameters, connection failure)
+{ type: 'started', cancelToken, limits }  // connected; token is null without SESSION_SECRET
+{ type: 'statement', index, startedAt }   // before each statement runs
+{ type: 'columns', seq, index, columns }  // result set seq (of statement index) opens
+{ type: 'rows', seq, rows }               // a batch of rows — arrays in column order
+{ type: 'done', results, duration }       // the run finished; results[seq] describes result set seq
+{ type: 'error', error, httpStatus }      // the run never started (auth, connection parameters, connection failure)
 ```
 
-Each entry in `results` is one result set:
+Rows are arrays rather than objects so columns that share a name (`SELECT w._id, m._id …`) keep their own values. Each column is `{ name, label, dataTypeID }`; `label` is unique (`_id`, `_id (2)`). Each entry in `results` is one result set, without its rows:
 
 ```js
-{ statement, status: 'success' | 'error' | 'cancelled' | 'skipped', columns, rows, rowCount, command, duration,
-  error?, position?, hint?, code? }   // error fields only when status !== 'success'
+{ statement, index, status: 'success' | 'error' | 'cancelled' | 'skipped', columns, rowCount, command, duration,
+  truncated?,                                       // true when QUERY_MAX_ROWS cut the result short
+  error?, code?, position?, hint?, httpStatus? }    // error fields only when status !== 'success'
 ```
 
-A SQL error is reported in its entry, not as an HTTP error.
+The HTTP status (200) is sent before any SQL runs, so a SQL error is reported in its entry: the Postgres `code` (SQLSTATE), `position` and `httpStatus` — `400` for errors in the query (syntax, unknown table or column, bad data, unsupported feature), `500` for server-side failures (connection, resources, internal errors). The editor uses `position` to underline the failing token. Requests rejected before the stream starts (empty query, too many statements) return a real `400`.
 
 **Cancelling.** What can be stopped depends on the database:
 
@@ -447,6 +461,8 @@ aepQueryBuilder/
 | [SYSTEM_DATASET.md](docs/SYSTEM_DATASET.md) | System and Segment Snapshot dataset groups |
 | [DBExploreOptions.md](docs/DBExploreOptions.md) | Options for a Dataset Explorer in Direct Connection mode (analysis) |
 | [FIX_SET_1.md](docs/FIX_SET_1.md) | Icon controls, Cancel Query, connection-leak fix, multi-statement execution, Ctrl+Enter |
+| [FIX_SET_2.md](docs/FIX_SET_2.md) | Duplicate column names, row limits and paged results streamed in batches |
+| [FIX_SET_3.md](docs/FIX_SET_3.md) | JSON cell rendering and viewer, TSV copy quoting, isExecuting() ref, shared default port, SQL error codes and editor highlighting |
 | [IMPROVEMENTS.md](docs/IMPROVEMENTS.md) | Codebase review: bugs, security, performance and feature ideas |
 | [frontend-vite-template.md](docs/frontend-vite-template.md) | Original Vite + React template notes |
 
