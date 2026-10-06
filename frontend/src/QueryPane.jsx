@@ -250,9 +250,9 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     setCancelling(true)
     onExecutingChange?.('cancelling')
     addLog('info', 'Cancelling query…')
-    if (run.token) sendCancel(run)
-    else if (run.started) run.ac.abort() // server can't issue cancel tokens — drop the request
-    // otherwise the token is sent as soon as the server reports the run started
+    if (run.token && run.current) sendCancel(run)
+    else if (run.started && !run.token) run.ac.abort() // server can't issue cancel tokens — drop the request
+    // otherwise the cancel goes out when the server reports the first statement
     run.timer = setTimeout(() => run.ac.abort(), CANCEL_CONFIRM_MS)
   }
 
@@ -305,10 +305,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           if (msg.type === 'started') {
             run.started = true
             run.token = msg.cancelToken
-            if (run.cancelRequested) {
-              if (run.token) sendCancel(run)
-              else run.ac.abort()
-            }
+            if (run.cancelRequested && !run.token) run.ac.abort()
           } else if (msg.type === 'statement') {
             run.current = { index: msg.index, startedAt: msg.startedAt }
             // a cancel went out before this statement was known, or the server moved

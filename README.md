@@ -393,7 +393,7 @@ A SQL error is reported in its entry, not as an HTTP error.
 **Cancelling.** Cancel posts the `cancelToken` and the running statement to `/api/query/cancel`. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. The endpoint does two things:
 
 1. Sends a PostgreSQL CancelRequest. Plain PostgreSQL honours this; Query Service ignores it.
-2. In AEP mode, cancels through the Query Service API. The API can't filter by SQL text, so the server lists queries created since the statement started, picks the newest unfinished one whose SQL matches the running statement, and sends `PATCH /data/foundation/query/queries/{id}` with `{ "op": "cancel" }`. This uses the session cookie's credentials. Direct mode has no API credentials, so only step 1 applies there.
+2. In AEP mode, cancels through the Query Service API. The API can't filter by SQL text, so the server lists queries created since the statement started (including hidden ones, `excludeHidden=false`), picks the newest unfinished one whose SQL matches the running statement, and sends `PATCH /data/foundation/query/queries/{id}` with `{ "op": "cancel" }`. This uses the session cookie's credentials. Direct mode has no API credentials, so only step 1 applies there.
 
 Once the database stops the statement it comes back as `cancelled` and the rest of the run as `skipped`. The editor waits up to 20 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running. The console logs what each path did, including the recent queries the API returned when nothing matched.
 

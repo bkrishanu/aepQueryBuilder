@@ -539,11 +539,13 @@ async function cancelViaQueryApi(creds, sandbox, statement, startedAt) {
   const since = new Date((Number(startedAt) || Date.now()) - QS_CLOCK_SKEW_MS).toISOString()
   const list = await axios.get('https://platform.adobe.io/data/foundation/query/queries', {
     headers,
-    params: { orderby: '-created', limit: 50, property: `created>=${since}` },
+    // excludeHidden=false: queries from Postgres clients may be classed as
+    // "non-user driven" and are hidden from the default listing
+    params: { orderby: '-created', limit: 50, property: `created>=${since}`, excludeHidden: false },
   })
   const queries = Array.isArray(list.data?.queries) ? list.data.queries : []
-  const target = normalizeSql(statement)
-  const match = queries.find(q => !QS_TERMINAL_STATES.has(String(q.state).toUpperCase()) && normalizeSql(q.request?.sql) === target)
+  const target = normalizeSql(statement).toLowerCase()
+  const match = queries.find(q => !QS_TERMINAL_STATES.has(String(q.state).toUpperCase()) && normalizeSql(q.request?.sql).toLowerCase() === target)
   if (!match) {
     return {
       cancelled: false,
