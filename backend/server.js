@@ -302,7 +302,7 @@ function pgErrorInfo(err) {
  * Returns [{ statement, status: 'success'|'error'|'cancelled'|'skipped', columns, rows,
  *            rowCount, command, duration, error?, … }]
  */
-async function runStatements(client, statements, signal) {
+async function runStatements(client, statements, signal, onStatement) {
   let lost = false
   client.on('end', () => { lost = true })
   const results = []
@@ -313,6 +313,7 @@ async function runStatements(client, statements, signal) {
       continue
     }
     const t0 = Date.now()
+    onStatement?.(i, t0)
     try {
       const out = await client.query(statement)
       const duration = Date.now() - t0
@@ -352,13 +353,14 @@ const CANCEL_TOKEN_TTL_MS = 6 * 60 * 60 * 1000
  * Shared body of /api/query and /api/query/direct. Streams newline-delimited JSON:
  *   { type: 'started', cancelToken }   — once connected; cancelToken is null when
  *                                        no SESSION_SECRET is configured
+ *   { type: 'statement', index, startedAt } — before each statement runs
  *   { type: 'done', results, duration }
  *   { type: 'error', error }           — the run could not start (auth, connection, …)
  * The cancel token lets any server instance cancel this run through
  * /api/query/cancel — on serverless hosts the browser dropping the request is
  * not reliably reported to the function that is running the query.
  */
-async function executeQueryRequest(res, statements, signal, getPgConfig) {
+async function executeQueryRequest(res, statements, signal, getPgConfig, cancelContext = {}) {
   const t0 = Date.now()
   res.status(200)
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
@@ -372,11 +374,12 @@ async function executeQueryRequest(res, statements, signal, getPgConfig) {
       send({
         type: 'started',
         cancelToken: canCancel
-          ? seal({ host: pgConfig.host, port: pgConfig.port, pid: client.processID, key: client.secretKey, exp: Date.now() + CANCEL_TOKEN_TTL_MS }, CANCEL_AAD)
+          ? seal({ ...cancelContext, host: pgConfig.host, port: pgConfig.port, pid: client.processID, key: client.secretKey, exp: Date.now() + CANCEL_TOKEN_TTL_MS }, CANCEL_AAD)
           : null,
       })
     }
-    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal), signal, onConnected)
+    const onStatement = (index, startedAt) => send({ type: 'statement', index, startedAt })
+    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal, onStatement), signal, onConnected)
     send({ type: 'done', results, duration: Date.now() - t0 })
   } catch (err) {
     if (!(signal.aborted || err.cancelled)) {
@@ -516,23 +519,81 @@ app.post('/api/query', requireSession, async (req, res) => {
     )
     const { host, port, dbName, username, token: pgToken } = cpRes.data
     return { host, port, database: dbName, user: username, password: pgToken }
-  })
+  }, { mode: 'aep', org: IMS_ORG, sandbox: SANDBOX_NAME })
 })
+
+const QS_TERMINAL_STATES = new Set(['SUCCESS', 'FAILED', 'KILLED', 'CANCELLED', 'CANCELED', 'DELETED'])
+const QS_CLOCK_SKEW_MS = 60 * 1000
+const normalizeSql = (sql) => String(sql || '').replace(/\s+/g, ' ').replace(/[\s;]+$/, '').trim()
+
+/**
+ * Cancel a statement through the Query Service API (PATCH /queries/{id}
+ * { op: 'cancel' }). Query Service does not act on the Postgres CancelRequest,
+ * and the API has no SQL filter, so recent queries are listed and the newest
+ * unfinished one whose SQL matches the running statement is cancelled.
+ * Returns diagnostics: { cancelled, queryId?, state?, scanned, error?, recent? }.
+ */
+async function cancelViaQueryApi(creds, sandbox, statement, startedAt) {
+  const token = await getAccessToken(creds)
+  const headers = { Accept: 'application/json', ...aepHeaders({ token, API_KEY: creds.API_KEY, IMS_ORG: creds.IMS_ORG, SANDBOX_NAME: sandbox }) }
+  const since = new Date((Number(startedAt) || Date.now()) - QS_CLOCK_SKEW_MS).toISOString()
+  const list = await axios.get('https://platform.adobe.io/data/foundation/query/queries', {
+    headers,
+    params: { orderby: '-created', limit: 50, property: `created>=${since}` },
+  })
+  const queries = Array.isArray(list.data?.queries) ? list.data.queries : []
+  const target = normalizeSql(statement)
+  const match = queries.find(q => !QS_TERMINAL_STATES.has(String(q.state).toUpperCase()) && normalizeSql(q.request?.sql) === target)
+  if (!match) {
+    return {
+      cancelled: false,
+      scanned: queries.length,
+      // what the API did return, to show why nothing matched
+      recent: queries.slice(0, 5).map(q => ({ state: q.state, client: q.client, sql: normalizeSql(q.request?.sql).slice(0, 80) })),
+    }
+  }
+  await axios.patch(
+    `https://platform.adobe.io/data/foundation/query/queries/${encodeURIComponent(match.id)}`,
+    { op: 'cancel' },
+    { headers: { ...headers, 'Content-Type': 'application/json' } }
+  )
+  return { cancelled: true, queryId: match.id, state: match.state, scanned: queries.length }
+}
 
 /**
  * POST /api/query/cancel
- * Body: { token } — the cancelToken streamed by /api/query or /api/query/direct.
- * Sends a PostgreSQL CancelRequest for that run's statement. The token is
- * sealed by this server, so it cannot be forged to target another host.
- * Returns { sent } — whether the request reached the database server; whether
- * it was honoured shows up in the original run's results (status 'cancelled').
+ * Body: { token, statement?, startedAt? } — token is the cancelToken streamed by
+ * /api/query or /api/query/direct; statement / startedAt identify the running
+ * statement (from the stream's 'statement' messages).
+ * 1. Sends a PostgreSQL CancelRequest (works on plain Postgres).
+ * 2. AEP runs only: also cancels the matching query through the Query Service
+ *    API, using the session cookie's credentials.
+ * The token is sealed by this server, so it cannot be forged to target another host.
+ * Returns { sent, api } — whether each path was delivered; whether the database
+ * honoured it shows up in the original run's results.
  */
 app.post('/api/query/cancel', async (req, res) => {
   if (!SESSION_KEY) return sessionMisconfigured(res)
   const t = typeof req.body?.token === 'string' ? unseal(req.body.token, CANCEL_AAD) : null
   if (!t) return res.status(400).json({ error: 'Invalid or expired cancel token.' })
-  const sent = await sendCancelRequest({ host: t.host, port: t.port }, t.pid, t.key)
-  res.json({ sent })
+  const { statement, startedAt } = req.body
+
+  const viaApi = async () => {
+    if (t.mode !== 'aep') return null
+    if (typeof statement !== 'string' || !statement.trim()) return { cancelled: false, error: 'No statement given.' }
+    const session = readSession(req)
+    if (!session || session.c.IMS_ORG !== t.org) return { cancelled: false, error: 'No matching credential session.' }
+    try {
+      return await cancelViaQueryApi(session.c, t.sandbox, statement, startedAt)
+    } catch (err) {
+      return { cancelled: false, error: err.response?.data?.title || err.response?.data?.message || err.message, status: err.response?.status }
+    }
+  }
+  const [sent, api] = await Promise.all([
+    sendCancelRequest({ host: t.host, port: t.port }, t.pid, t.key),
+    viaApi(),
+  ])
+  res.json({ sent, api })
 })
 
 /**

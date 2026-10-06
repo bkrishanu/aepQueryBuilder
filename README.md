@@ -368,7 +368,7 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 |--------|----------|------|--------|
 | `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verifies connectivity |
 | `POST` | `/api/query/direct` | same + `queries` (array) or `query` | NDJSON stream — see [Query results](#query-results) |
-| `POST` | `/api/query/cancel` | `token` (from the `started` message) | Sends a PostgreSQL CancelRequest; `{ sent }`. Works in both modes |
+| `POST` | `/api/query/cancel` | `token` (from `started`), `statement`, `startedAt` (from `statement`) | Postgres CancelRequest, plus a Query Service API cancel in AEP mode; `{ sent, api }` |
 
 ### Query results
 
@@ -376,6 +376,7 @@ Statements run one after another on a single connection, which is always closed 
 
 ```js
 { type: 'started', cancelToken }    // connected; token is null without SESSION_SECRET
+{ type: 'statement', index, startedAt } // before each statement runs
 { type: 'done', results, duration } // the run finished
 { type: 'error', error }            // the run never started (auth, connection parameters, connection failure)
 ```
@@ -389,7 +390,12 @@ Each entry in `results` is one result set:
 
 A SQL error is reported in its entry, not as an HTTP error.
 
-**Cancelling.** Posting the `cancelToken` to `/api/query/cancel` makes the server send a PostgreSQL CancelRequest for the running statement. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. Once the database confirms, that statement comes back as `cancelled` and the rest as `skipped`. The editor waits up to 10 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running in Query Service. As a fallback, if the request itself is aborted and the server notices, it also cancels and closes the connection.
+**Cancelling.** Cancel posts the `cancelToken` and the running statement to `/api/query/cancel`. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. The endpoint does two things:
+
+1. Sends a PostgreSQL CancelRequest. Plain PostgreSQL honours this; Query Service ignores it.
+2. In AEP mode, cancels through the Query Service API. The API can't filter by SQL text, so the server lists queries created since the statement started, picks the newest unfinished one whose SQL matches the running statement, and sends `PATCH /data/foundation/query/queries/{id}` with `{ "op": "cancel" }`. This uses the session cookie's credentials. Direct mode has no API credentials, so only step 1 applies there.
+
+Once the database stops the statement it comes back as `cancelled` and the rest of the run as `skipped`. The editor waits up to 20 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running. The console logs what each path did, including the recent queries the API returned when nothing matched.
 
 ---
 
@@ -452,7 +458,8 @@ aepQueryBuilder/
 | Wrong statement runs | Place the cursor inside the statement you want, or select it. End every statement with `;` |
 | Only one of several statements ran | With nothing selected, only the statement under the cursor runs — select all of them to run them in order |
 | A long query won't stop | Click the red **Cancel** icon next to Run (or **Cancel query** in Results); closing the tab or disconnecting also cancels it |
-| *Cancel not confirmed* | The database didn't confirm within 10 seconds, so the query may still be running — check **Queries > Logs** in AEP. The console shows whether the cancel request reached the database server |
+| *Cancel not confirmed* | The database didn't confirm within 20 seconds, so the query may still be running — check **Queries > Logs** in AEP. The console lists what the Query Service API returned |
+| Cancel doesn't work in Direct mode against Query Service | Query Service ignores the Postgres cancel signal, and Direct mode has no API credentials to cancel through the API — use AEP API mode |
 | Dataset Explorer is just a thin strip | It's collapsed — click the strip (or the header arrow on small screens) to expand it |
 | `+` tab button missing | Maximum of 5 tabs — close one first |
 | Vercel: *GitHub user not found* | The commit's author email isn't on your GitHub account — fix `git config user.email` and push a new commit |

@@ -143,12 +143,13 @@ function describeSet(set) {
 }
 
 // ─── query streaming ──────────────────────────────────────────────────────────
-// How long Cancel waits for the server to confirm before giving up on the run.
-const CANCEL_CONFIRM_MS = 10000
+// How long Cancel waits for the server to confirm before giving up on the run
+// (the Query Service API cancel needs a token exchange + two API calls).
+const CANCEL_CONFIRM_MS = 20000
 
 /**
  * POST a run to /api/query or /api/query/direct and read its NDJSON stream,
- * calling onMessage for each message ('started' | 'done' | 'error').
+ * calling onMessage for each message ('started' | 'statement' | 'done' | 'error').
  */
 async function streamQuery(endpoint, body, signal, onMessage) {
   const res = await fetch(`/api${endpoint}`, {
@@ -185,9 +186,10 @@ async function streamQuery(endpoint, body, signal, onMessage) {
 // (Run / Cancel buttons, Ctrl+Enter) can drive it; onExecutingChange reports
 // false | 'running' | 'cancelling'. onRun is wired to the editor's Ctrl+Enter.
 //
-// Cancel sends the run's cancel token to /api/query/cancel, then keeps reading
-// the stream: a statement coming back with status 'cancelled' confirms that the
-// database stopped it. Without confirmation within CANCEL_CONFIRM_MS the request
+// Cancel sends the run's cancel token and the running statement to
+// /api/query/cancel (Postgres CancelRequest + Query Service API cancel), then
+// keeps reading the stream: the running statement coming back cancelled or
+// failed confirms that the database stopped it. Without confirmation within CANCEL_CONFIRM_MS the request
 // is abandoned and the UI says the query may still be running on the server.
 //
 // results: null
@@ -213,16 +215,38 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   }, [copiedKey])
 
   const sendCancel = (run) => {
-    api.post('/query/cancel', { token: run.token })
-      .then(res => addLog(res.data.sent ? 'info' : 'warn', res.data.sent
-        ? 'Cancel request delivered to the database server — waiting for confirmation…'
-        : 'Cancel request could not be delivered to the database server.'))
+    const cur = run.current
+    run.cancelSentFor = cur?.index ?? -1
+    api.post('/query/cancel', {
+      token: run.token,
+      statement: cur ? run.statements[cur.index] : undefined,
+      startedAt: cur?.startedAt,
+    })
+      .then(({ data }) => {
+        addLog(data.sent ? 'info' : 'warn', data.sent
+          ? 'Postgres cancel request delivered to the database server.'
+          : 'Postgres cancel request could not be delivered to the database server.')
+        logApiCancel(data.api)
+      })
       .catch(err => addLog('warn', `Cancel request failed: ${err.response?.data?.error || err.message}`))
+  }
+
+  const logApiCancel = (r) => {
+    if (!r) return // Direct mode: no Query Service API credentials
+    if (r.cancelled) {
+      addLog('info', `Query Service API: cancel issued for query ${r.queryId} (was ${r.state}) — waiting for confirmation…`)
+    } else if (r.error) {
+      addLog('warn', `Query Service API cancel failed${r.status ? ` (HTTP ${r.status})` : ''}: ${r.error}`)
+    } else {
+      addLog('warn', `Query Service API: no unfinished query with this SQL among ${r.scanned} recent queries.`)
+      ;(r.recent || []).forEach(q => addLog('info', `  recent: [${q.state}] [${q.client || '—'}] ${q.sql}`))
+    }
   }
 
   const requestCancel = (run) => {
     if (!run || run.cancelRequested) return
     run.cancelRequested = true
+    run.cancelIndex = run.current?.index ?? 0
     setCancelling(true)
     onExecutingChange?.('cancelling')
     addLog('info', 'Cancelling query…')
@@ -265,7 +289,11 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
       const statements = plan.statements.map(s => s.text)
       if (!statements.length) { addLog('warn', 'Query is empty.'); return }
 
-      const run = { ac: new AbortController(), token: null, started: false, cancelRequested: false, timer: 0 }
+      const run = {
+        ac: new AbortController(), statements, token: null, started: false,
+        current: null,       // { index, startedAt } of the statement running on the server
+        cancelRequested: false, cancelIndex: -1, cancelSentFor: null, timer: 0,
+      }
       runRef.current = run
       setRunning(true)
       addLog('info', statements.length === 1
@@ -281,6 +309,11 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
               if (run.token) sendCancel(run)
               else run.ac.abort()
             }
+          } else if (msg.type === 'statement') {
+            run.current = { index: msg.index, startedAt: msg.startedAt }
+            // a cancel went out before this statement was known, or the server moved
+            // on to the next statement after a cancel — cancel this one too
+            if (run.cancelRequested && run.token && msg.index !== run.cancelSentFor) sendCancel(run)
           } else if (msg.type === 'done') {
             done = msg
           } else if (msg.type === 'error') {
@@ -288,7 +321,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           }
         })
         if (!done) throw new Error('The server closed the connection before the query finished.')
-        const sets = done.results || []
+        let sets = done.results || []
+        if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
+          // Query Service reports an API cancel as an ordinary error on the statement
+          const at = sets.findIndex((s, i) => i >= run.cancelIndex && s.status === 'error')
+          if (at >= 0) sets = sets.map((s, i) => i === at ? { ...s, status: 'cancelled' } : s)
+        }
         setResults({ sets, duration: done.duration })
         setActiveTab('results')
         logOutcome(sets)
