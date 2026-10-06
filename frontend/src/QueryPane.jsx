@@ -3,7 +3,7 @@ import api, { isSessionError, notifySessionExpired } from './api.js'
 import { LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square } from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
 import Btn, { IconBtn } from './Button.jsx'
-import { splitStatements, RUN_SHORTCUT } from './sqlStatements.js'
+import { splitStatements, RUN_SHORTCUT, isQsCancellable, isQueryServiceTarget } from './sqlStatements.js'
 
 // ─── shared design tokens (keep in sync with App.jsx C object) ───────────────
 const C = {
@@ -144,8 +144,8 @@ function describeSet(set) {
 
 // ─── query streaming ──────────────────────────────────────────────────────────
 // How long Cancel waits for the server to confirm before giving up on the run
-// (the Query Service API cancel needs a token exchange + two API calls).
-const CANCEL_CONFIRM_MS = 20000
+// (the Query Service API lookup retries for ~10s, then the batch job stops).
+const CANCEL_CONFIRM_MS = 30000
 
 /**
  * POST a run to /api/query or /api/query/direct and read its NDJSON stream,
@@ -189,12 +189,17 @@ async function streamQuery(endpoint, body, signal, onMessage) {
 // Cancel sends the run's cancel token and the running statement to
 // /api/query/cancel (Postgres CancelRequest + Query Service API cancel), then
 // keeps reading the stream: the running statement coming back cancelled or
-// failed confirms that the database stopped it. Without confirmation within CANCEL_CONFIRM_MS the request
-// is abandoned and the UI says the query may still be running on the server.
+// failed confirms that the database stopped it. Without confirmation within
+// CANCEL_CONFIRM_MS the request is abandoned and the UI says so.
+//
+// On Query Service a SELECT can't be cancelled at all (see isQsCancellable).
+// Cancel then "detaches": the UI stops waiting at once and says the query
+// will finish on the server, while the stream is still read in the
+// background so later INSERT INTO / CTAS statements of the run get cancelled.
 //
 // results: null
 //        | { sets: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
-//        | { cancelled: true, unconfirmed?: true }
+//        | { cancelled: true, unconfirmed?: true, detached?: true }
 //        | { error }   — the request itself failed (auth, connection, …)
 const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onRun }, ref) {
   const [query, setQuery]         = useState('')
@@ -206,6 +211,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   const editorRef  = useRef(null)
   const [cancelling, setCancelling] = useState(false)
   const runRef     = useRef(null)  // { ac, token, cancelRequested, timer } of the run in flight
+  const detachedRef = useRef(new Set()) // cancelled runs still read in the background
   const runningRef = useRef(false) // synchronous guard: state updates land too late to stop a double run
 
   useEffect(() => {
@@ -235,6 +241,9 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     if (!r) return // Direct mode: no Query Service API credentials
     if (r.cancelled) {
       addLog('info', `Query Service API: cancel issued for query ${r.queryId} (was ${r.state}) — waiting for confirmation…`)
+    } else if (r.unsupported) {
+      // the client skips these; only reached if a statement was misclassified
+      addLog('warn', 'Query Service API: this statement type cannot be cancelled.')
     } else if (r.finished) {
       addLog('warn', `Query Service API: query ${r.queryId} had already finished (${r.state}) — nothing left to cancel.`)
     } else if (r.error) {
@@ -245,25 +254,58 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     }
   }
 
+  // Query Service can't stop this statement: free the UI now, keep reading the
+  // stream in the background so later cancellable statements are cancelled.
+  const detach = (run) => {
+    if (run.detached) return
+    run.detached = true
+    clearTimeout(run.timer)
+    detachedRef.current.add(run)
+    if (runRef.current === run) runRef.current = null
+    setRunning(false)
+    setResults({ cancelled: true, detached: true })
+    setActiveTab('results')
+    const more = (run.current?.index ?? 0) < run.statements.length - 1
+    addLog('warn', 'Stopped waiting. Query Service can\'t cancel a SELECT sent from a SQL client (only INSERT INTO and CREATE TABLE AS can be cancelled) — it will finish on the server and its results are discarded.'
+      + (more ? ' Later INSERT INTO / CREATE TABLE AS statements in this run are cancelled as they start.' : ''))
+  }
+
+  // the server reports statement `index` running after Cancel: cancel it, or detach if it can't be
+  const cancelStatement = (run) => {
+    const index = run.current.index
+    if (index === run.cancelSentFor) return
+    if (run.isQS && !isQsCancellable(run.statements[index])) {
+      run.cancelSentFor = index
+      detach(run)
+    } else if (run.token) {
+      sendCancel(run)
+    }
+  }
+
   const requestCancel = (run) => {
     if (!run || run.cancelRequested) return
     run.cancelRequested = true
     run.cancelIndex = run.current?.index ?? 0
+    addLog('info', 'Cancelling query…')
+    if (run.current && run.isQS && !isQsCancellable(run.statements[run.current.index])) {
+      run.cancelSentFor = run.current.index
+      detach(run)
+      return
+    }
     setCancelling(true)
     onExecutingChange?.('cancelling')
-    addLog('info', 'Cancelling query…')
     if (run.token && run.current) sendCancel(run)
     else if (run.started && !run.token) run.ac.abort() // server can't issue cancel tokens — drop the request
     // otherwise the cancel goes out when the server reports the first statement
     run.timer = setTimeout(() => run.ac.abort(), CANCEL_CONFIRM_MS)
   }
 
-  // closing the pane mid-run cancels it
+  // closing the pane mid-run cancels it and stops background reads
   useEffect(() => () => {
     const run = runRef.current
-    if (!run) return
-    if (run.token) api.post('/query/cancel', { token: run.token }).catch(() => {})
-    run.ac.abort()
+    if (run?.token) api.post('/query/cancel', { token: run.token }).catch(() => {})
+    run?.ac.abort()
+    detachedRef.current.forEach(r => r.ac.abort())
   }, [])
 
   const setRunning = (running) => {
@@ -293,6 +335,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
 
       const run = {
         ac: new AbortController(), statements, token: null, started: false,
+        isQS: isQueryServiceTarget(endpoint, payload), detached: false,
         current: null,       // { index, startedAt } of the statement running on the server
         cancelRequested: false, cancelIndex: -1, cancelSentFor: null, timer: 0,
       }
@@ -310,9 +353,9 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
             if (run.cancelRequested && !run.token) run.ac.abort()
           } else if (msg.type === 'statement') {
             run.current = { index: msg.index, startedAt: msg.startedAt }
-            // a cancel went out before this statement was known, or the server moved
-            // on to the next statement after a cancel — cancel this one too
-            if (run.cancelRequested && run.token && msg.index !== run.cancelSentFor) sendCancel(run)
+            // Cancel came before this statement was known, or the server moved on
+            // to the next statement after a cancel — cancel (or detach from) this one
+            if (run.cancelRequested) cancelStatement(run)
           } else if (msg.type === 'done') {
             done = msg
           } else if (msg.type === 'error') {
@@ -320,6 +363,10 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           }
         })
         if (!done) throw new Error('The server closed the connection before the query finished.')
+        if (run.detached) {
+          addLog('info', 'The cancelled run has finished on the server; its results were discarded.')
+          return
+        }
         let sets = done.results || []
         if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
           // Query Service reports an API cancel as an ordinary error on the statement
@@ -333,6 +380,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
           addLog('warn', 'The query finished before the cancel took effect.')
         }
       } catch (err) {
+        if (run.detached) return // the UI has moved on
         if (err.name === 'AbortError') {
           if (!run.cancelRequested) return // pane closed
           setResults({ cancelled: true, unconfirmed: true })
@@ -344,8 +392,11 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
         }
       } finally {
         clearTimeout(run.timer)
-        if (runRef.current === run) runRef.current = null
-        setRunning(false)
+        detachedRef.current.delete(run)
+        if (!run.detached) {
+          if (runRef.current === run) runRef.current = null
+          setRunning(false)
+        }
       }
     },
     cancel: () => requestCancel(runRef.current),
@@ -451,10 +502,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
               <EmptyState title="No results yet" text="Execute a query to see data here." icon={Table2} />
             ) : results.cancelled ? (
               <EmptyState
-                title={results.unconfirmed ? 'Cancel not confirmed' : 'Query cancelled'}
-                text={results.unconfirmed
-                  ? 'The server did not confirm the cancel — the query may still be running in Query Service.'
-                  : 'Execution was stopped and the database connection was closed.'}
+                title={results.detached ? 'Stopped waiting' : results.unconfirmed ? 'Cancel not confirmed' : 'Query cancelled'}
+                text={results.detached
+                  ? 'Query Service can\'t cancel SELECT queries sent from a SQL client — this one will finish on the server. Its results are discarded.'
+                  : results.unconfirmed
+                    ? 'The server did not confirm the cancel — the query may still be running in Query Service.'
+                    : 'Execution was stopped and the database connection was closed.'}
                 icon={OctagonX}
                 tone="warn"
               />

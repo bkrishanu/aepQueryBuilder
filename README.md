@@ -34,7 +34,7 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 | **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot*; collapses to a slim rail to give the editor more room |
 | **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
 | **Query editor** | CodeMirror 6 SQL editor with syntax highlighting and autocompletion; runs the statement under the cursor or every selected statement; **Ctrl+Enter** to run; fills the window height |
-| **Query control** | Compact icon Run / Cancel buttons with tooltips; cancelling stops the statement on the server and closes the connection |
+| **Query control** | Compact icon Run / Cancel buttons with tooltips; Cancel stops the statement on the server where the database allows it (see [Cancelling](#query-results)) |
 | **Multiple tabs** | Up to 5 independent query tabs, each with its own editor and results |
 | **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; sticky headers, 20-row × 5-column viewport with scrolling, one-click tab-delimited copy for Excel / Sheets |
 | **Reliability** | Every Postgres connection is closed on success, error, timeout or cancel — failed queries don't leak Query Service connection slots |
@@ -266,7 +266,7 @@ On large screens the editor fills the window height (at least 420px) and widens 
 | Switch | Click a tab — editor text and results are preserved |
 | Close | `×` on the tab (the last tab can't be closed) |
 | Run | **▶ Run** (or **Ctrl+Enter**; **⌘ Enter** also works on macOS) runs the active tab |
-| Cancel | **■ Cancel** appears while a query runs; it cancels the statement on the server and closes the connection |
+| Cancel | **■ Cancel** appears while a query runs. On plain PostgreSQL it stops any statement. On Query Service it stops `INSERT INTO` and `CREATE TABLE … AS`; a `SELECT` can't be stopped there, so Cancel stops waiting and the query finishes on the server |
 
 ### What Run / Ctrl+Enter runs
 
@@ -390,12 +390,22 @@ Each entry in `results` is one result set:
 
 A SQL error is reported in its entry, not as an HTTP error.
 
-**Cancelling.** Cancel posts the `cancelToken` and the running statement to `/api/query/cancel`. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. The endpoint does two things:
+**Cancelling.** What can be stopped depends on the database:
+
+| Database | Statement | What Cancel does |
+|----------|-----------|------------------|
+| PostgreSQL (Direct mode) | Any | Cancels it on the server |
+| Query Service (AEP mode) | `INSERT INTO`, `CREATE TABLE … AS` | Cancels it through the Query Service API |
+| Query Service | `SELECT` and everything else | Can't be cancelled — Query Service ignores the Postgres cancel signal, and its API rejects the request (*"Only batch queries issued over HTTP and CTAS or INSERT INTO queries can be canceled"*). The editor stops waiting at once and says so; the query finishes on the server and its results are discarded |
+
+In a multi-statement run, the stream keeps being read in the background after a `SELECT` is let go, so any later `INSERT INTO` / `CREATE TABLE … AS` in the run is cancelled as it starts. Query Service is recognised by AEP mode or a Direct host ending in `adobe.io`.
+
+Cancel posts the `cancelToken` and the running statement to `/api/query/cancel`. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. The endpoint does two things:
 
 1. Sends a PostgreSQL CancelRequest. Plain PostgreSQL honours this; Query Service ignores it.
-2. In AEP mode, cancels through the Query Service API. The API can't filter by SQL text, so the server lists queries created since the statement started (including hidden ones, `excludeHidden=false`), picks the newest unfinished one whose SQL matches the running statement, and sends `PATCH /data/foundation/query/queries/{id}` with `{ "op": "cancel" }`. Queries from Postgres clients (client `Generic PostgreSQL`) appear in the listing a few seconds after they start, so the lookup is retried every 1.5 seconds for about 10 seconds. It stops early if the query has already finished. This uses the session cookie's credentials. Direct mode has no API credentials, so only step 1 applies there.
+2. In AEP mode, for `INSERT INTO` and `CREATE TABLE … AS`, cancels through the Query Service API. The API can't filter by SQL text, so the server lists queries created since the statement started (including hidden ones, `excludeHidden=false`), picks the newest unfinished one whose SQL matches the running statement, and sends `PATCH /data/foundation/query/queries/{id}` with `{ "op": "cancel" }`. Queries from Postgres clients (client `Generic PostgreSQL`) appear in the listing a few seconds after they start, so the lookup is retried every 1.5 seconds for about 10 seconds. It stops early if the query has already finished. This uses the session cookie's credentials. Direct mode has no API credentials, so only step 1 applies there.
 
-Once the database stops the statement it comes back as `cancelled` and the rest of the run as `skipped`. The editor waits up to 20 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running. The console logs what each path did, including the recent queries the API returned when nothing matched.
+Once the database stops the statement it comes back as `cancelled` and the rest of the run as `skipped`. The editor waits up to 30 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running. The console logs what each path did, including the recent queries the API returned when nothing matched.
 
 ---
 
@@ -457,8 +467,9 @@ aepQueryBuilder/
 | Query returns no rows | Table names are case-sensitive — copy them from the Dataset Explorer |
 | Wrong statement runs | Place the cursor inside the statement you want, or select it. End every statement with `;` |
 | Only one of several statements ran | With nothing selected, only the statement under the cursor runs — select all of them to run them in order |
-| A long query won't stop | Click the red **Cancel** icon next to Run (or **Cancel query** in Results); closing the tab or disconnecting also cancels it |
-| *Cancel not confirmed* | The database didn't confirm within 20 seconds, so the query may still be running — check **Queries > Logs** in AEP. The console lists what the Query Service API returned |
+| A long query won't stop | Click the red **Cancel** icon next to Run (or **Cancel query** in Results); closing the tab or disconnecting also cancels it. On Query Service only `INSERT INTO` and `CREATE TABLE … AS` can be stopped |
+| *Stopped waiting* after Cancel | The statement was a `SELECT` on Query Service, which can't be cancelled. It finishes on the server; add a `LIMIT` to keep exploratory queries short |
+| *Cancel not confirmed* | The database didn't confirm within 30 seconds, so the query may still be running — check **Queries > Logs** in AEP. The console lists what the Query Service API returned |
 | Cancel doesn't work in Direct mode against Query Service | Query Service ignores the Postgres cancel signal, and Direct mode has no API credentials to cancel through the API — use AEP API mode |
 | Dataset Explorer is just a thin strip | It's collapsed — click the strip (or the header arrow on small screens) to expand it |
 | `+` tab button missing | Maximum of 5 tabs — close one first |

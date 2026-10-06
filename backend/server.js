@@ -524,6 +524,12 @@ app.post('/api/query', requireSession, async (req, res) => {
 
 const QS_TERMINAL_STATES = new Set(['SUCCESS', 'FAILED', 'KILLED', 'CANCELLED', 'CANCELED', 'DELETED'])
 const QS_CLOCK_SKEW_MS = 60 * 1000
+// Query Service's API cancels only CTAS and INSERT INTO statements from SQL clients
+const LEADING_SQL_NOISE = /^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)+/
+const isQsCancellable = (sql) => {
+  const s = String(sql || '').replace(LEADING_SQL_NOISE, '').toLowerCase()
+  return /^insert\s+into\b/.test(s) || (/^create\s+table\b/.test(s) && /\bas\b/.test(s))
+}
 const normalizeSql = (sql) => String(sql || '').replace(/\s+/g, ' ').replace(/[\s;]+$/, '').trim()
 
 // A query from a Postgres client shows up in GET /queries a few seconds after
@@ -603,6 +609,7 @@ app.post('/api/query/cancel', async (req, res) => {
   const viaApi = async () => {
     if (t.mode !== 'aep') return null
     if (typeof statement !== 'string' || !statement.trim()) return { cancelled: false, error: 'No statement given.' }
+    if (!isQsCancellable(statement)) return { cancelled: false, unsupported: true }
     const session = readSession(req)
     if (!session || session.c.IMS_ORG !== t.org) return { cancelled: false, error: 'No matching credential session.' }
     try {
