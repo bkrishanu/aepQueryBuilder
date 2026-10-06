@@ -1,7 +1,9 @@
-import { useRef, useImperativeHandle, forwardRef } from 'react'
+import { useRef, useMemo, useLayoutEffect, useImperativeHandle, forwardRef } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { sql } from '@codemirror/lang-sql'
-import { EditorView } from '@codemirror/view'
+import { EditorView, keymap } from '@codemirror/view'
+import { Prec } from '@codemirror/state'
+import { resolveStatements, splitStatements } from './sqlStatements.js'
 
 // ─── DBeaver-inspired light theme (white background) ─────────────────────────
 // Colour mapping mirrors DBeaver's SQL syntax on a white editor background:
@@ -123,67 +125,43 @@ const sqlHighlightStyle = [
   { tag: 'null', color: '#7b00d4', fontWeight: 'bold' },
 ]
 
-// ─── helper: resolve the query to run ────────────────────────────────────────
-/**
- * Given the full editor content and the current CodeMirror EditorState,
- * returns the single SQL statement that should be executed:
- *
- *   1. If the user has a text selection → run only that selection.
- *   2. Otherwise → split the full text on ";" boundaries, find the statement
- *      whose character range contains the cursor, and run that one.
- *   3. If only one statement exists → run it regardless of cursor position.
- */
-export function resolveQueryToRun(editorState) {
-  if (!editorState) return null
-
-  const fullText = editorState.doc.toString()
-  const sel = editorState.selection.main
-
-  // 1. Text selected → run selection
-  if (!sel.empty) {
-    const selected = fullText.slice(sel.from, sel.to).trim()
-    if (selected) return selected
-  }
-
-  // 2. Split into statements on semicolons (keep trailing semicolons)
-  const stmts = []
-  let pos = 0
-  for (const part of fullText.split(/(?<=;)/)) {
-    const trimmed = part.trim()
-    const start = pos
-    const end = pos + part.length
-    pos = end
-    if (trimmed) stmts.push({ text: trimmed, start, end })
-  }
-
-  if (stmts.length === 0) return fullText.trim() || null
-
-  // Only one statement → run it
-  if (stmts.length === 1) return stmts[0].text
-
-  // 3. Find statement that contains the cursor
-  const cursor = sel.from
-  const hit = stmts.find(s => cursor >= s.start && cursor <= s.end)
-  if (hit) return hit.text
-
-  // Cursor past end → run last statement
-  return stmts[stmts.length - 1].text
+// Ctrl+Enter / Cmd+Enter → run. Highest precedence: the default keymap binds
+// Mod-Enter to "insert blank line".
+const runKeymap = (onRun) => {
+  const run = () => { onRun(); return true }
+  return Prec.highest(keymap.of([
+    { key: 'Mod-Enter', run },
+    { key: 'Ctrl-Enter', run },
+  ]))
 }
 
 // ─── SqlEditor component ──────────────────────────────────────────────────────
 /**
- * Exposes `getQueryToRun()` via ref so the parent can call it on Execute.
+ * Exposes `getStatementsToRun()` via ref (see resolveStatements) so the parent
+ * can resolve what to execute. Ctrl+Enter (and Cmd+Enter on macOS) calls
+ * `onRun`, the same action as the Run button.
  */
-const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder }, ref) {
+const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, onRun }, ref) {
   const cmRef = useRef(null)
+  const onRunRef = useRef(onRun)
+  useLayoutEffect(() => { onRunRef.current = onRun })
 
   useImperativeHandle(ref, () => ({
-    getQueryToRun() {
+    getStatementsToRun() {
       const view = cmRef.current?.view
-      if (!view) return value.trim() || null
-      return resolveQueryToRun(view.state)
+      if (!view) return { mode: 'single', statements: splitStatements(value) }
+      const { from, to } = view.state.selection.main
+      return resolveStatements(view.state.doc.toString(), from, to)
     },
   }))
+
+  // Stable extensions, so CodeMirror is not reconfigured on every render.
+  const extensions = useMemo(() => [
+    sql(),
+    dbeaverTheme,
+    EditorView.lineWrapping,
+    runKeymap(() => onRunRef.current?.()),
+  ], [])
 
   return (
     <CodeMirror
@@ -191,11 +169,7 @@ const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder }
       value={value}
       onChange={onChange}
       placeholder={placeholder}
-      extensions={[
-        sql(),
-        dbeaverTheme,
-        EditorView.lineWrapping,
-      ]}
+      extensions={extensions}
       theme="none"        // we supply our own theme above
       basicSetup={{
         lineNumbers: true,

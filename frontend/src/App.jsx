@@ -1,12 +1,13 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import {
   SlidersHorizontal, Upload, ShieldCheck, Layers, Plug, Unplug, ChevronDown,
-  SquareTerminal, Plus, X, Play, Eraser,
+  SquareTerminal, Plus, X, Play, Square, Eraser,
 } from 'lucide-react'
 import api, { SESSION_EXPIRED } from './api.js'
 import QueryPane from './QueryPane.jsx'
 import DatasetExplorer from './DatasetExplorer.jsx'
-import Btn from './Button.jsx'
+import Btn, { IconBtn } from './Button.jsx'
+import { isRunShortcut, RUN_SHORTCUT, RUN_SHORTCUT_ARIA } from './sqlStatements.js'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
@@ -206,11 +207,16 @@ export default function App() {
   const configOpen = connStatus !== 'connected' || !configCollapsed
 
   // ── multi-pane state ─────────────────────────────────────────────────────
-  const MAX_PANES = 3
+  const MAX_PANES = 5
   const mkPane = (n) => ({ id: Date.now() + n, label: `Query ${n}` })
   const [panes, setPanes]                 = useState(() => [mkPane(1)])
   const [activePane, setActivePane]       = useState(0) // index into panes[]
   const paneRefs                          = useRef({})  // keyed by pane.id
+  const [runningPanes, setRunningPanes]   = useState({}) // pane.id → true while its query runs
+  const tabBarRef                         = useRef(null)
+
+  // Dataset Explorer collapse — only offered while connected (AEP mode)
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false)
 
   const [loadingSandboxes, setLoadingSandboxes] = useState(false)
   const [connecting, setConnecting]       = useState(false)
@@ -401,6 +407,7 @@ export default function App() {
 
   // ── disconnect ───────────────────────────────────────────────────────────
   const handleDisconnect = () => {
+    cancelAllQueries()
     setConnStatus('idle')
     const label = connMode === 'direct'
       ? `${directHost}/${directDb}`
@@ -414,6 +421,7 @@ export default function App() {
       ? { IMS_ORG: session.IMS_ORG, SANDBOX_NAME: selectedSandbox }
       : null
   ), [connMode, connStatus, session, selectedSandbox])
+  const explorerIsCollapsed = explorerCollapsed && !!explorerCreds
 
   // ── execute query (delegates to active pane ref) ─────────────────────────
   const handleExecute = () => {
@@ -421,13 +429,52 @@ export default function App() {
     const pane = panes[activePane]
     if (!pane) return
     const paneRef = paneRefs.current[pane.id]
-    if (!paneRef) return
+    if (!paneRef || runningPanes[pane.id]) return // already running — no double execution
     const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
     const payload  = connMode === 'direct'
       ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd }
       : { SANDBOX_NAME: selectedSandbox }
     paneRef.execute(endpoint, payload)
   }
+
+  // ── cancel the active pane's running query ───────────────────────────────
+  const handleCancel = () => {
+    const pane = panes[activePane]
+    if (pane && runningPanes[pane.id]) paneRefs.current[pane.id]?.cancel()
+  }
+
+  const cancelAllQueries = () => {
+    Object.values(paneRefs.current).forEach(r => r?.cancel())
+  }
+
+  // Ctrl+Enter outside the editor (the editor handles it itself and marks the
+  // event handled). Text inputs keep their own Enter behaviour.
+  const executeRef = useRef(handleExecute)
+  useLayoutEffect(() => { executeRef.current = handleExecute })
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.defaultPrevented || e.repeat || !isRunShortcut(e)) return
+      if (e.target.closest?.('input, textarea, select, [contenteditable="true"]')) return
+      e.preventDefault()
+      executeRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Keep the active tab visible when the strip scrolls (narrow screens, 5 tabs).
+  // Adjusts only the strip's scrollLeft, never the page scroll.
+  useEffect(() => {
+    const bar = tabBarRef.current
+    const tab = bar?.querySelector('[aria-selected="true"]')
+    if (!tab) return
+    const left = tab.offsetLeft - bar.offsetLeft
+    if (left < bar.scrollLeft) bar.scrollLeft = left - 4
+    else if (left + tab.offsetWidth > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = left + tab.offsetWidth - bar.clientWidth + 4
+  }, [activePane, panes.length])
+
+  const activePaneId  = panes[activePane]?.id
+  const activeRunning = !!runningPanes[activePaneId]
 
   // ── pane management ──────────────────────────────────────────────────────
   const handleAddPane = () => {
@@ -442,6 +489,7 @@ export default function App() {
     if (panes.length === 1) return // always keep at least one
     const pane = panes[idx]
     delete paneRefs.current[pane.id]
+    setRunningPanes(prev => { const next = { ...prev }; delete next[pane.id]; return next })
     const newPanes = panes.filter((_, i) => i !== idx)
     // relabel to keep names tidy
     const relabeled = newPanes.map((p, i) => ({ ...p, label: `Query ${i + 1}` }))
@@ -758,19 +806,29 @@ export default function App() {
 
         {/* ── EXPLORER + WORKSPACE ── */}
         {/* Dataset Explorer relies on AEP APIs, so it is hidden in Direct mode */}
-        <div className={`grid grid-cols-1 ${connMode === 'aep' ? 'lg:grid-cols-[minmax(260px,320px)_minmax(0,1fr)]' : ''} gap-5 flex-1 items-stretch`}>
+        {/* Collapsing the explorer animates its column down to a slim rail (see .workbench-grid) */}
+        <div className={`grid grid-cols-1 ${connMode === 'aep' ? `workbench-grid ${explorerIsCollapsed ? 'workbench-grid--rail' : 'workbench-grid--explorer'}` : ''} gap-5 flex-1 items-stretch`}>
 
-        {connMode === 'aep' && <DatasetExplorer credentials={explorerCreds} addLog={addLog} />}
+        {connMode === 'aep' && (
+          <DatasetExplorer
+            credentials={explorerCreds}
+            addLog={addLog}
+            collapsed={explorerIsCollapsed}
+            onToggleCollapsed={explorerCreds ? () => setExplorerCollapsed(c => !c) : undefined}
+          />
+        )}
 
-        {/* ── PANE AREA (workspace card) ── */}
-        <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm flex flex-col flex-1 min-w-0`}>
+        {/* ── PANE AREA (workspace card) — fills the viewport height on large screens ── */}
+        <section className={`${C.cardBg} rounded-2xl border ${C.cardBorder} shadow-sm flex flex-col flex-1 min-w-0 lg:min-h-[calc(100vh-7rem)]`}>
 
-          {/* Toolbar: Query 1 / Query 2 / Query 3 / [+] / [Execute] */}
+          {/* Toolbar: Query 1 … Query 5 / [+] / [Run] [Cancel] */}
           <div className={`flex items-center gap-2 px-3 sm:px-4 py-2.5 border-b ${C.divider} bg-slate-50/70 rounded-t-2xl`}>
-            <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
+            <div ref={tabBarRef} role="tablist" aria-label="Query tabs" className="flex items-center gap-1 min-w-0 overflow-x-auto">
               {panes.map((pane, idx) => (
                 <div
                   key={pane.id}
+                  role="tab"
+                  aria-selected={activePane === idx}
                   onClick={() => setActivePane(idx)}
                   className={`group flex items-center gap-2 pl-3 ${panes.length > 1 ? 'pr-2' : 'pr-3'} py-1.5 text-sm font-medium rounded-lg border cursor-pointer transition-all select-none whitespace-nowrap ${
                     activePane === idx
@@ -778,7 +836,7 @@ export default function App() {
                       : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-slate-900 hover:bg-white/70`
                   }`}
                 >
-                  <SquareTerminal size={15} strokeWidth={2} className={`shrink-0 ${activePane === idx ? 'text-blue-600' : 'text-slate-400'}`} />
+                  <SquareTerminal size={15} strokeWidth={2} className={`shrink-0 hidden sm:block ${activePane === idx ? 'text-blue-600' : 'text-slate-400'}`} />
                   {pane.label}
                   {/* close button — only show if more than 1 pane */}
                   {panes.length > 1 && (
@@ -807,19 +865,30 @@ export default function App() {
               )}
             </div>
 
-            {/* Execute button — right-aligned */}
-            <div className="ml-auto shrink-0">
-              <Btn
+            {/* Run / Cancel — right-aligned, compact icon controls */}
+            <div className="ml-auto flex items-center gap-1.5 shrink-0">
+              {activeRunning && (
+                <IconBtn
+                  variant="stop"
+                  icon={Square}
+                  iconClassName="fill-current"
+                  label="Cancel query"
+                  onClick={handleCancel}
+                  align="end"
+                />
+              )}
+              <IconBtn
                 variant="success"
                 icon={Play}
+                iconClassName="fill-current"
+                label={activeRunning ? 'Query running…' : 'Run query — the selection, or the statement under the cursor'}
+                shortcut={RUN_SHORTCUT}
+                keyShortcuts={RUN_SHORTCUT_ARIA}
                 onClick={handleExecute}
                 disabled={connStatus !== 'connected'}
-                title="Run the selected text, or the statement under the cursor"
-                iconClassName="fill-current"
-                className="!px-5"
-              >
-                Execute
-              </Btn>
+                loading={activeRunning}
+                align="end"
+              />
             </div>
           </div>
 
@@ -829,6 +898,8 @@ export default function App() {
               <QueryPane
                 ref={el => { paneRefs.current[pane.id] = el }}
                 addLog={addLog}
+                onRun={handleExecute}
+                onExecutingChange={running => setRunningPanes(prev => ({ ...prev, [pane.id]: running }))}
               />
             </div>
           ))}

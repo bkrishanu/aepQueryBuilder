@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
 import api from './api.js'
-import { LoaderCircle, Copy, Check, Table2, CircleCheck } from 'lucide-react'
+import { LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square } from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
-import Btn from './Button.jsx'
+import Btn, { IconBtn } from './Button.jsx'
+import { splitStatements, RUN_SHORTCUT } from './sqlStatements.js'
 
 // ─── shared design tokens (keep in sync with App.jsx C object) ───────────────
 const C = {
@@ -76,13 +77,13 @@ function ResultsTable({ results }) {
         style={{ width: `${tableWidthPct}%`, tableLayout: 'fixed' }}
       >
         <colgroup>
-          {results.columns.map(col => <col key={col} style={{ width: `${colWidthPct}%` }} />)}
+          {results.columns.map((col, ci) => <col key={ci} style={{ width: `${colWidthPct}%` }} />)}
         </colgroup>
         <thead>
           <tr>
             {results.columns.map((col, ci) => (
               <th
-                key={col}
+                key={ci}
                 title={col}
                 className={`sticky top-0 z-10 bg-slate-100 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-600 border-b border-slate-200 whitespace-nowrap overflow-hidden text-ellipsis ${ci < colCount - 1 ? 'border-r border-r-slate-200' : ''}`}
                 style={{ height: `${HEADER_H}px` }}
@@ -103,7 +104,7 @@ function ResultsTable({ results }) {
                 const isNull = v === null || v === undefined
                 return (
                   <td
-                    key={col}
+                    key={ci}
                     title={isNull ? 'null' : String(v)}
                     className={`px-4 text-slate-700 whitespace-nowrap overflow-hidden text-ellipsis ${i < rowCount - 1 ? 'border-b border-slate-100' : ''} ${ci < colCount - 1 ? 'border-r border-r-slate-100' : ''}`}
                     style={{ height: `${ROW_H}px` }}
@@ -122,58 +123,123 @@ function ResultsTable({ results }) {
   )
 }
 
+// ─── result helpers ───────────────────────────────────────────────────────────
+const plural  = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+const oneLine = (sql) => sql.replace(/\s+/g, ' ').trim()
+const preview = (sql) => { const s = oneLine(sql); return s.length > 80 ? `${s.slice(0, 80)}…` : s }
+
+/** 1-based character position inside `text` → { line, col }. */
+function lineCol(text, pos) {
+  const before = text.slice(0, Math.max(0, pos - 1)).split('\n')
+  return { line: before.length, col: before[before.length - 1].length + 1 }
+}
+
+/** One-line description of a result set, for headers and the console. */
+function describeSet(set) {
+  if (set.status !== 'success') return `${set.duration ?? 0}ms`
+  if (set.columns.length) return `${plural(set.rows.length, 'row')} · ${plural(set.columns.length, 'col')} · ${set.duration}ms`
+  const affected = set.rowCount != null && set.command !== 'SELECT' ? ` · ${plural(set.rowCount, 'row')} affected` : ''
+  return `${set.command || 'Statement'}${affected} · ${set.duration}ms`
+}
+
 // ─── QueryPane ────────────────────────────────────────────────────────────────
-// Exposes execute(payload, endpoint, addLog) via ref so parent can trigger runs.
-const QueryPane = forwardRef(function QueryPane({ addLog }, ref) {
-  const [query, setQuery]       = useState('')
-  const [results, setResults]   = useState(null)
+// Exposes execute(endpoint, payload) and cancel() via ref so the parent toolbar
+// (Run / Cancel buttons, Ctrl+Enter) can drive it; onExecutingChange(bool)
+// reports when a run starts and ends. onRun is wired to the editor's Ctrl+Enter.
+//
+// results: null
+//        | { sets: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
+//        | { cancelled: true }
+//        | { error }   — the request itself failed (auth, connection, …)
+const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onRun }, ref) {
+  const [query, setQuery]         = useState('')
+  const [results, setResults]     = useState(null)
   const [executing, setExecuting] = useState(false)
+  const [startedAt, setStartedAt] = useState(null)
   const [activeTab, setActiveTab] = useState('editor') // 'editor' | 'results'
-  const editorRef               = useRef(null)
-  const [copied, setCopied]     = useState(false) // transient "Copied" feedback on the copy button
+  const [copiedKey, setCopiedKey] = useState(null)     // transient "Copied" feedback per result set
+  const editorRef  = useRef(null)
+  const abortRef   = useRef(null)  // AbortController of the run in flight
+  const runningRef = useRef(false) // synchronous guard: state updates land too late to stop a double run
 
   useEffect(() => {
-    if (!copied) return
-    const t = setTimeout(() => setCopied(false), 1600)
+    if (copiedKey === null) return
+    const t = setTimeout(() => setCopiedKey(null), 1600)
     return () => clearTimeout(t)
-  }, [copied])
+  }, [copiedKey])
 
-  // Expose execute + getQueryToRun to parent
+  // closing the pane mid-run cancels the request (the backend then closes its connection)
+  useEffect(() => () => abortRef.current?.abort(), [])
+
+  const setRunning = (running) => {
+    runningRef.current = running
+    setExecuting(running)
+    setStartedAt(running ? Date.now() : null)
+    onExecutingChange?.(running)
+  }
+
+  const logOutcome = (sets) => {
+    sets.forEach((set, i) => {
+      const tag = sets.length > 1 ? `Query ${i + 1}` : 'Query'
+      if (set.status === 'success') addLog('info', `${tag} succeeded: ${describeSet(set)}.`)
+      else if (set.status === 'error') addLog('error', `${tag} failed: ${set.error}`)
+      else addLog('warn', `${tag} ${set.error}`)
+    })
+  }
+
   useImperativeHandle(ref, () => ({
     execute: async (endpoint, payload) => {
-      const toRun = editorRef.current?.getQueryToRun() ?? query.trim()
-      if (!toRun) { addLog('warn', 'Query is empty.'); return }
+      if (runningRef.current) return // a run is in flight — ignore repeated Run / Ctrl+Enter
+      const plan = editorRef.current?.getStatementsToRun() ?? { statements: splitStatements(query) }
+      const statements = plan.statements.map(s => s.text)
+      if (!statements.length) { addLog('warn', 'Query is empty.'); return }
 
-      setExecuting(true)
-      addLog('info', `Executing: ${toRun.slice(0, 80)}${toRun.length > 80 ? '…' : ''}`)
+      const ac = new AbortController()
+      abortRef.current = ac
+      setRunning(true)
+      addLog('info', statements.length === 1
+        ? `Executing: ${preview(statements[0])}`
+        : `Executing ${statements.length} selected statements sequentially…`)
       try {
-        const res = await api.post(endpoint, { ...payload, query: toRun })
-        setResults(res.data)
+        const res = await api.post(endpoint, { ...payload, queries: statements }, { signal: ac.signal })
+        const sets = res.data.results || []
+        setResults({ sets, duration: res.data.duration })
         setActiveTab('results')
-        addLog('info', `Query returned ${res.data.rows.length} row(s) in ${res.data.duration}ms.`)
+        logOutcome(sets)
       } catch (err) {
-        setResults(null)
-        addLog('error', `Query failed: ${err.response?.data?.error || err.message}`)
+        if (err.code === 'ERR_CANCELED') {
+          setResults({ cancelled: true })
+          setActiveTab('results')
+          addLog('warn', 'Query cancelled — execution stopped and the database connection was closed.')
+        } else {
+          const msg = err.response?.data?.error || err.message
+          setResults({ error: msg })
+          addLog('error', `Query failed: ${msg}`)
+        }
       } finally {
-        setExecuting(false)
+        if (abortRef.current === ac) abortRef.current = null
+        setRunning(false)
       }
     },
-    getQueryToRun: () => editorRef.current?.getQueryToRun() ?? query.trim(),
-    isExecuting: () => executing,
+    cancel: () => abortRef.current?.abort(),
   }))
 
-  const handleCopyResults = () => {
-    if (!results) return
+  const handleCopy = (set, key) => {
     const lines = [
-      results.columns.join('\t'),
-      ...results.rows.map(r => results.columns.map(c => r[c] ?? '').join('\t')),
+      set.columns.join('\t'),
+      ...set.rows.map(r => set.columns.map(c => r[c] ?? '').join('\t')),
     ]
     navigator.clipboard.writeText(lines.join('\n'))
+    setCopiedKey(key)
     addLog('info', 'Results copied to clipboard (tab-delimited).')
   }
 
+  const sets      = results?.sets
+  const failed    = sets ? sets.filter(s => s.status !== 'success').length : 0
+  const badgeText = sets && (sets.length === 1 ? (sets[0].rows?.length ?? 0) : `${sets.length} sets`)
+
   return (
-    <div className="flex flex-col h-full min-w-0">
+    <div className="flex flex-col flex-1 min-h-0 min-w-0">
       {/* inner tab bar: Editor | Results */}
       <div className="flex items-center gap-1 px-3 sm:px-4 border-b border-slate-200 shrink-0 overflow-x-auto">
         {[
@@ -190,11 +256,15 @@ const QueryPane = forwardRef(function QueryPane({ addLog }, ref) {
             }`}
           >
             {label}
-            {id === 'results' && results && (
-              <span className={`text-[11px] font-semibold rounded-full px-2 py-px tabular-nums ${
-                activeTab === id ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'
-              }`}>
-                {results.rows.length}
+            {id === 'results' && sets && (
+              <span
+                title={failed ? `${plural(failed, 'statement')} did not succeed` : undefined}
+                className={`text-[11px] font-semibold rounded-full px-2 py-px tabular-nums ${
+                  failed ? 'bg-rose-100 text-rose-700'
+                    : activeTab === id ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'
+                }`}
+              >
+                {badgeText}
               </span>
             )}
             {id === 'results' && executing && (
@@ -209,76 +279,86 @@ const QueryPane = forwardRef(function QueryPane({ addLog }, ref) {
 
         {/* Query Editor */}
         {activeTab === 'editor' && (
-          <div className="flex flex-col p-3 sm:p-4 gap-3" style={{ height: '420px' }}>
+          // grows with the workspace card (viewport height on large screens); 420px floor
+          <div className="flex flex-col flex-1 min-h-[420px] p-3 sm:p-4 gap-3">
             <div className="flex items-center justify-between shrink-0">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">SQL Query</span>
               {executing ? (
-                <span className="text-xs font-medium text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-0.5 flex items-center gap-1.5">
+                <span role="status" className="text-xs font-medium text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-2.5 py-0.5 flex items-center gap-1.5">
                   <LoaderCircle size={14} strokeWidth={2.5} className="animate-spin" />
-                  Running…
+                  Running… <Elapsed since={startedAt} />
                 </span>
               ) : (
-                <span className="hidden sm:inline text-[11px] text-slate-400">Runs the selection, or the statement under the cursor</span>
+                <span className="hidden sm:inline text-[11px] text-slate-400">
+                  <kbd className="font-mono text-slate-500">{RUN_SHORTCUT}</kbd> runs the selection, or the statement under the cursor
+                </span>
               )}
             </div>
-            <div className="flex-1 min-h-0 rounded-lg border border-slate-200 overflow-hidden shadow-inner focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-500/15 transition-colors">
+            <div className="relative flex-1 min-h-0 rounded-lg border border-slate-200 overflow-hidden shadow-inner focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-500/15 transition-colors">
+              {/* absolute fill gives CodeMirror a definite height to size against */}
+              <div className="absolute inset-0">
               <SqlEditor
                 ref={editorRef}
                 value={query}
                 onChange={setQuery}
+                onRun={onRun}
                 placeholder="SELECT * FROM your_dataset LIMIT 10;"
               />
+              </div>
             </div>
           </div>
         )}
 
         {/* Results */}
         {activeTab === 'results' && (
-          <div className="flex flex-col p-3 sm:p-4 gap-3 min-w-0" style={{ minHeight: '420px' }}>
-            <div className="flex items-center justify-between gap-3 shrink-0">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                Results
-                {results && (
+          <div className="flex flex-col flex-1 min-h-[420px] p-3 sm:p-4 gap-3 min-w-0">
+            {executing ? (
+              <div role="status" className="flex-1 flex flex-col items-center justify-center gap-3">
+                <LoaderCircle size={32} strokeWidth={2} className="animate-spin text-blue-600" />
+                <p className="text-sm text-slate-500">Executing query, please wait… <Elapsed since={startedAt} /></p>
+                <Btn variant="danger" size="sm" icon={Square} iconClassName="fill-current" onClick={() => abortRef.current?.abort()}>
+                  Cancel query
+                </Btn>
+              </div>
+            ) : !results ? (
+              <EmptyState title="No results yet" text="Execute a query to see data here." icon={Table2} />
+            ) : results.cancelled ? (
+              <EmptyState
+                title="Query cancelled"
+                text="Execution was stopped and the database connection was closed."
+                icon={OctagonX}
+                tone="warn"
+              />
+            ) : results.error ? (
+              <ErrorPanel title="Query failed" message={results.error} />
+            ) : sets.length === 1 ? (
+              <ResultSet
+                set={sets[0]}
+                title="Results"
+                copied={copiedKey === 0}
+                onCopy={() => handleCopy(sets[0], 0)}
+              />
+            ) : (
+              <>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                  Results
                   <span className="ml-2 normal-case tracking-normal text-slate-400 font-normal">
-                    {results.rows.length} row{results.rows.length !== 1 ? 's' : ''} · {results.columns.length} col{results.columns.length !== 1 ? 's' : ''}
+                    {plural(sets.length, 'statement')} · {sets.length - failed} succeeded
+                    {failed > 0 && <span className="text-rose-600"> · {failed} failed</span>}
                     {results.duration !== undefined && ` · ${results.duration}ms`}
                   </span>
-                )}
-              </span>
-              <Btn
-                variant="secondary"
-                size="sm"
-                icon={copied ? Check : Copy}
-                iconClassName={copied ? 'text-emerald-600' : ''}
-                onClick={() => { handleCopyResults(); setCopied(true) }}
-                disabled={!results || results.rows.length === 0}
-              >
-                <span className="hidden sm:inline">{copied ? 'Copied' : 'Copy Results'}</span>
-                <span className="sm:hidden">{copied ? 'Copied' : 'Copy'}</span>
-              </Btn>
-            </div>
-            {executing && (
-              <div className="flex-1 flex flex-col items-center justify-center gap-3">
-                <LoaderCircle size={32} strokeWidth={2} className="animate-spin text-blue-600" />
-                <p className="text-sm text-slate-500">Executing query, please wait…</p>
-              </div>
-            )}
-            {!executing && !results && (
-              <EmptyState
-                title="No results yet"
-                text="Execute a query to see data here."
-                icon={Table2}
-              />
-            )}
-            {!executing && results && results.rows.length === 0 && (
-              <EmptyState
-                title="Query executed successfully"
-                text="No rows returned."
-                icon={CircleCheck}
-              />
-            )}
-            {!executing && results && results.rows.length > 0 && (
-              <ResultsTable results={results} />
+                </p>
+                {sets.map((set, i) => (
+                  <ResultSet
+                    key={i}
+                    set={set}
+                    title={`Query ${i + 1}`}
+                    multi
+                    copied={copiedKey === i}
+                    onCopy={() => handleCopy(set, i)}
+                  />
+                ))}
+              </>
             )}
           </div>
         )}
@@ -287,10 +367,113 @@ const QueryPane = forwardRef(function QueryPane({ addLog }, ref) {
   )
 })
 
-function EmptyState({ icon: Icon, title, text }) {
+/** Live "1.2s" counter from a start timestamp. */
+function Elapsed({ since }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 100)
+    return () => clearInterval(t)
+  }, [])
+  return <span className="tabular-nums">{(Math.max(0, now - (since ?? now)) / 1000).toFixed(1)}s</span>
+}
+
+const STATUS_CHIP = {
+  success: { label: 'Success', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  error:   { label: 'Failed',  cls: 'bg-rose-50 text-rose-700 border-rose-200' },
+  skipped: { label: 'Skipped', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+}
+
+/**
+ * One statement's outcome: header (title, status, stats, copy) and its table,
+ * empty state or error. `multi` adds the status chip, the statement text and
+ * a card frame so several result sets read as separate blocks.
+ */
+function ResultSet({ set, title, multi = false, copied, onCopy }) {
+  const ok      = set.status === 'success'
+  const hasCols = ok && set.columns.length > 0
+  const chip    = STATUS_CHIP[set.status] || STATUS_CHIP.error
+  const where   = !ok && set.position ? lineCol(set.statement, set.position) : null
+
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50/50 py-10">
-      <div className="w-10 h-10 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center text-slate-400">
+    <section
+      aria-label={`${title}: ${chip.label}`}
+      className={`flex flex-col gap-2.5 min-w-0 ${multi ? 'rounded-xl border border-slate-200 p-3' : 'flex-1'}`}
+    >
+      <div className="flex items-center justify-between gap-3 min-h-8">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 shrink-0">{title}</span>
+          {(multi || !ok) && (
+            <span className={`shrink-0 text-[10px] font-semibold uppercase tracking-wide rounded-full border px-2 py-px ${chip.cls}`}>
+              {chip.label}
+            </span>
+          )}
+          <span className="truncate text-[11px] text-slate-400 tabular-nums">{describeSet(set)}</span>
+        </div>
+        {hasCols && (
+          <IconBtn
+            size="sm"
+            icon={copied ? Check : Copy}
+            iconClassName={copied ? 'text-emerald-600' : ''}
+            label={copied ? 'Copied' : 'Copy results (tab-delimited)'}
+            onClick={onCopy}
+            disabled={set.rows.length === 0}
+            align="end"
+          />
+        )}
+      </div>
+
+      {multi && (
+        <code title={set.statement} className="block truncate rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 font-mono text-[12px] text-slate-600">
+          {oneLine(set.statement)}
+        </code>
+      )}
+
+      {ok && set.rows.length > 0 && <ResultsTable results={set} />}
+      {ok && set.rows.length === 0 && (
+        <EmptyState
+          compact={multi}
+          title="Query executed successfully"
+          text={hasCols ? 'No rows returned.' : describeSet(set)}
+          icon={CircleCheck}
+        />
+      )}
+      {!ok && (
+        <ErrorPanel
+          tone={set.status === 'skipped' ? 'warn' : 'error'}
+          title={set.status === 'skipped' ? 'Not executed' : where ? `Failed at line ${where.line}, column ${where.col}` : 'Statement failed'}
+          message={set.error}
+          hint={set.hint}
+        />
+      )}
+    </section>
+  )
+}
+
+function ErrorPanel({ title, message, hint, tone = 'error' }) {
+  const warn = tone === 'warn'
+  return (
+    <div role="alert" className={`rounded-lg border px-4 py-3 text-sm ${warn ? 'border-amber-200 bg-amber-50/70' : 'border-rose-200 bg-rose-50/70'}`}>
+      <div className="flex items-start gap-2.5">
+        <CircleAlert size={16} strokeWidth={2.25} className={`mt-0.5 shrink-0 ${warn ? 'text-amber-600' : 'text-rose-600'}`} />
+        <div className="min-w-0">
+          <p className={`font-medium ${warn ? 'text-amber-800' : 'text-rose-800'}`}>{title}</p>
+          <p className={`mt-0.5 font-mono text-[12px] whitespace-pre-wrap break-words ${warn ? 'text-amber-700' : 'text-rose-700'}`}>{message}</p>
+          {hint && <p className="mt-1 text-xs text-rose-600">Hint: {hint}</p>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EmptyState({ icon: Icon, title, text, tone, compact = false }) {
+  const warn = tone === 'warn'
+  return (
+    <div className={`flex-1 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed ${
+      warn ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-slate-50/50'
+    } ${compact ? 'py-5' : 'py-10'}`}>
+      <div className={`w-10 h-10 rounded-full bg-white border shadow-sm flex items-center justify-center ${
+        warn ? 'border-amber-200 text-amber-600' : 'border-slate-200 text-slate-400'
+      }`}>
         <Icon size={20} strokeWidth={1.75} />
       </div>
       <p className="text-sm font-medium text-slate-600">{title}</p>

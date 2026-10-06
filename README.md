@@ -1,7 +1,7 @@
 # AEP Query Editor
 
 A browser-based SQL workbench for **Adobe Experience Platform (AEP) Query Service**.
-Connect with AEP API credentials or raw database parameters, browse every dataset and schema field in a searchable explorer, and run queries across up to three editor tabs.
+Connect with AEP API credentials or raw database parameters, browse every dataset and schema field in a searchable explorer, and run one or many SQL statements across up to five editor tabs.
 
 **Live:** https://aep-query-builder-1oz5.vercel.app
 
@@ -31,11 +31,13 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 |------|--------------|
 | **Connection** | Two modes — **AEP API** (OAuth server-to-server + sandbox picker) or **Direct Connection** (host / port / database / user / password) |
 | **Credential security** | Uploaded config is verified with Adobe IMS and kept only in an encrypted, HttpOnly session cookie — never in browser storage |
-| **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot* |
+| **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot*; collapses to a slim rail to give the editor more room |
 | **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
-| **Query editor** | CodeMirror 6 SQL editor with syntax highlighting, autocompletion, and run-selection / run-statement-at-cursor |
-| **Multiple tabs** | Up to 3 independent query tabs, each with its own editor and results |
-| **Results grid** | Sticky headers, fixed 20-row × 5-column viewport with scrolling, one-click tab-delimited copy for Excel / Sheets |
+| **Query editor** | CodeMirror 6 SQL editor with syntax highlighting and autocompletion; runs the statement under the cursor or every selected statement; **Ctrl+Enter** to run; fills the window height |
+| **Query control** | Compact icon Run / Cancel buttons with tooltips; cancelling stops the statement on the server and closes the connection |
+| **Multiple tabs** | Up to 5 independent query tabs, each with its own editor and results |
+| **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; sticky headers, 20-row × 5-column viewport with scrolling, one-click tab-delimited copy for Excel / Sheets |
+| **Reliability** | Every Postgres connection is closed on success, error, timeout or cancel — failed queries don't leak Query Service connection slots |
 | **Console** | Timestamped activity log for every connection, query and explorer action |
 
 ---
@@ -159,6 +161,8 @@ Host, port, database and user are remembered in `sessionStorage` for the tab's l
 
 The panel to the left of the query editor (above it on small screens) lists the datasets in the connected sandbox.
 
+Once connected, the collapse button in the panel header folds the explorer into a slim rail on wide screens (down to its header strip on small screens), so the query editor gets the space. Click the rail or the button again to expand it. Loaded datasets, expanded nodes, search and scroll position are kept; nothing is reloaded.
+
 ### Sections
 
 ```text
@@ -252,33 +256,43 @@ The tree always shows plain names; `[0]` appears only in the copied value (and t
 
 CodeMirror 6 with a DBeaver-style light theme: line numbers, bracket matching, active-line highlight, SQL autocompletion and syntax colours (bold blue keywords, red strings, green numbers, italic comments, purple `NULL` / `TRUE` / `FALSE`). Font: Cascadia Code → Consolas → Courier New.
 
+On large screens the editor fills the window height (at least 420px) and widens when the Dataset Explorer is collapsed.
+
 ### Tabs
 
 | Action | How |
 |--------|-----|
-| Add a tab | `+` next to the tabs (hidden once 3 are open) |
+| Add a tab | `+` next to the tabs (hidden once 5 are open) |
 | Switch | Click a tab — editor text and results are preserved |
 | Close | `×` on the tab (the last tab can't be closed) |
-| Run | **Execute** runs the active tab |
+| Run | **▶ Run** (or **Ctrl+Enter**; **⌘ Enter** also works on macOS) runs the active tab |
+| Cancel | **■ Cancel** appears while a query runs; it cancels the statement on the server and closes the connection |
 
-### What Execute runs
+### What Run / Ctrl+Enter runs
+
+Statements end with `;`. Semicolons inside strings, quoted identifiers, `$$` bodies and comments are ignored.
 
 | Situation | Runs |
 |-----------|------|
-| Text is selected | The selection |
-| Several `;`-separated statements | The statement under the cursor |
-| One statement | That statement |
+| One statement in the editor | That statement |
+| Several statements, nothing selected | The statement under the cursor |
+| Text is selected | Every statement in the selection, in order |
 
-Each tab has **Editor** and **Results** sub-tabs; Results shows a row-count badge after a query runs.
+When several statements run, each gets its own result block marked **Success** or **Failed** (with the PostgreSQL error and its line/column). A failing statement doesn't stop the ones after it. A second Run while a query is in flight is ignored.
+
+Each tab has **Editor** and **Results** sub-tabs; Results shows a row-count badge after a query runs (or the number of result sets, red if any failed).
 
 ---
 
 ## Results
 
-- Header shows the row count and execution time.
+- Header shows the row count, column count and execution time. Statements that return no columns (`SET`, `CREATE`, `INSERT` …) show the command and rows affected.
+- When several statements run, each gets its own block with a **Success** / **Failed** chip and the statement text, under a summary line (`3 statements · 2 succeeded · 1 failed`).
+- A failed statement shows the PostgreSQL error, the line and column it points at, and any hint. Statements after it still run; if the connection itself drops, the rest are marked **Skipped**.
+- A cancelled run shows **Query cancelled**; a run that couldn't start (auth, connection) shows **Query failed** with the reason.
 - Up to **5 columns** share the full width; more columns get a fixed width with horizontal scrolling.
 - Up to **20 rows** are visible; more rows scroll vertically with a sticky header.
-- **Copy Results** copies everything as tab-delimited text with headers — paste directly into Excel or Google Sheets.
+- The **copy** icon on each result block copies it as tab-delimited text with headers — paste directly into Excel or Google Sheets.
 
 ---
 
@@ -344,7 +358,7 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 |--------|----------|------|--------|
 | `POST` | `/api/sandboxes` | — | `{ sandboxes: [{ name, title }], tenant }` |
 | `POST` | `/api/connect` | `SANDBOX_NAME` | Verifies Postgres connectivity; `{ host, port, dbName, username }` |
-| `POST` | `/api/query` | `SANDBOX_NAME`, `query` | `{ columns, rows, duration }` |
+| `POST` | `/api/query` | `SANDBOX_NAME`, `queries` (array) or `query` | `{ results, duration }` — see below |
 | `POST` | `/api/datasets` | `SANDBOX_NAME`, `knownMergePolicyIds?` | NDJSON stream of `page`, `mergePolicies`, `done` / `error` messages |
 | `POST` | `/api/schema` | `SANDBOX_NAME`, `schemaId` | `{ schemaId, title, fields: [{ name, type, itemType?, arrayDims?, children? }] }` |
 
@@ -353,7 +367,18 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 | Method | Endpoint | Body | Result |
 |--------|----------|------|--------|
 | `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verifies connectivity |
-| `POST` | `/api/query/direct` | same + `query` | `{ columns, rows, duration }` |
+| `POST` | `/api/query/direct` | same + `queries` (array) or `query` | `{ results, duration }` |
+
+### Query results
+
+Statements run one after another on a single connection, which is always closed afterwards (success, error or cancel). Each entry in `results` is one result set:
+
+```js
+{ statement, status: 'success' | 'error' | 'skipped', columns, rows, rowCount, command, duration,
+  error?, position?, hint?, code? }   // error fields only when status !== 'success'
+```
+
+A SQL error is reported in its entry, not as an HTTP error. `500` means the run never started (auth, connection parameters, connection failure). If the browser aborts the request, the server sends a PostgreSQL CancelRequest for the running statement and closes the connection.
 
 ---
 
@@ -366,8 +391,9 @@ aepQueryBuilder/
 │   │   ├── App.jsx              Layout, configuration card, connection flow, tabs, console
 │   │   ├── DatasetExplorer.jsx  Virtualized dataset / schema / merge-policy tree
 │   │   ├── QueryPane.jsx        Editor + results for one query tab
-│   │   ├── SqlEditor.jsx        CodeMirror 6 SQL editor and theme
-│   │   ├── Button.jsx           Shared button component
+│   │   ├── SqlEditor.jsx        CodeMirror 6 SQL editor, theme and Ctrl+Enter keymap
+│   │   ├── sqlStatements.js     Statement splitting and cursor / selection resolution
+│   │   ├── Button.jsx           Shared button and icon-button (tooltip) components
 │   │   ├── api.js               Shared API client + session-expiry signal
 │   │   └── index.css            Tailwind entry, scrollbars, animations
 │   ├── public/                  Logo and favicons
@@ -392,6 +418,9 @@ aepQueryBuilder/
 | [DATASET_ENHANCE.md](docs/DATASET_ENHANCE.md) | Array-path copy and scrollable explorer enhancements |
 | [PROFILE_SNAPSHOT.md](docs/PROFILE_SNAPSHOT.md) | Profile Snapshot and merge policy support |
 | [SYSTEM_DATASET.md](docs/SYSTEM_DATASET.md) | System and Segment Snapshot dataset groups |
+| [DBExploreOptions.md](docs/DBExploreOptions.md) | Options for a Dataset Explorer in Direct Connection mode (analysis) |
+| [FIX_SET_1.md](docs/FIX_SET_1.md) | Icon controls, Cancel Query, connection-leak fix, multi-statement execution, Ctrl+Enter |
+| [IMPROVEMENTS.md](docs/IMPROVEMENTS.md) | Codebase review: bugs, security, performance and feature ideas |
 | [frontend-vite-template.md](docs/frontend-vite-template.md) | Original Vite + React template notes |
 
 ---
@@ -409,6 +438,9 @@ aepQueryBuilder/
 | Dataset Explorer is empty | It needs AEP API mode; check the console for Catalog errors and the credential's Catalog access |
 | Merge policy shows a warning icon / raw ID | The merge policy lookup failed (hover for details); refresh to retry — the credential needs Profile access |
 | Query returns no rows | Table names are case-sensitive — copy them from the Dataset Explorer |
-| Wrong statement runs | Place the cursor inside the statement you want, or select it |
-| `+` tab button missing | Maximum of 3 tabs — close one first |
+| Wrong statement runs | Place the cursor inside the statement you want, or select it. End every statement with `;` |
+| Only one of several statements ran | With nothing selected, only the statement under the cursor runs — select all of them to run them in order |
+| A long query won't stop | Click the red **Cancel** icon next to Run (or **Cancel query** in Results); closing the tab or disconnecting also cancels it |
+| Dataset Explorer is just a thin strip | It's collapsed — click the strip (or the header arrow on small screens) to expand it |
+| `+` tab button missing | Maximum of 5 tabs — close one first |
 | Vercel: *GitHub user not found* | The commit's author email isn't on your GitHub account — fix `git config user.email` and push a new commit |

@@ -4,6 +4,7 @@ import {
   ChevronRight, Search, X, RefreshCw, Copy, Check, LoaderCircle, Database, UserCheck,
   Table2, Type, Hash, Calculator, ToggleLeft, Calendar, Clock, Folder, List, Layers, File,
   TriangleAlert, FolderTree, Camera, GitMerge, Server, Users,
+  PanelLeftClose, PanelLeftOpen, ChevronUp, ChevronDown,
 } from 'lucide-react'
 
 
@@ -124,7 +125,11 @@ function Highlight({ text, query }) {
 // State is kept per org+sandbox in `store`, so datasets, schemas and scroll
 // position survive refreshes, disconnect/reconnect and sandbox switching.
 // Expanded nodes and the search text are global and never reset.
-export default function DatasetExplorer({ credentials, addLog }) {
+// collapsed: hides the explorer — a slim rail on lg+ screens, just the header
+// strip below that. The component stays mounted, so loaded datasets, schemas,
+// expanded nodes and search survive a collapse/expand.
+// onToggleCollapsed: omit to hide the collapse control (e.g. while disconnected).
+export default function DatasetExplorer({ credentials, addLog, collapsed = false, onToggleCollapsed }) {
   const credKey = credentials ? `${credentials.IMS_ORG}|${credentials.SANDBOX_NAME}` : ''
 
   // credKey → { creds, datasets, schemas, scrollTop }
@@ -466,6 +471,15 @@ export default function DatasetExplorer({ credentials, addLog }) {
   }, [])
   useEffect(() => () => { roRef.current?.disconnect(); cancelAnimationFrame(rafRef.current) }, [])
 
+  // A hidden scroller comes back at scrollTop 0 — put it back where it was.
+  const wasCollapsed = useRef(collapsed)
+  useLayoutEffect(() => {
+    const reopened = wasCollapsed.current && !collapsed
+    wasCollapsed.current = collapsed
+    const el = scrollRef.current
+    if (reopened && el && keyRef.current) el.scrollTop = entry(keyRef.current).scrollTop
+  }, [collapsed, entry])
+
   const syncScroll = useCallback(() => {
     const el = scrollRef.current
     if (el) setScrollTop(Math.floor(el.scrollTop / ROW_H) * ROW_H)
@@ -554,10 +568,37 @@ export default function DatasetExplorer({ credentials, addLog }) {
 
   // ── render ───────────────────────────────────────────────────────────────
   return (
-    <aside className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col min-w-0 h-[480px] lg:h-[calc(100vh-7rem)] lg:min-h-[420px] lg:sticky lg:top-[5.5rem] lg:self-start overflow-hidden">
+    <aside
+      aria-label="Dataset Explorer"
+      className={`bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col min-w-0 ${collapsed ? 'h-auto' : 'h-[480px]'} lg:h-[calc(100vh-7rem)] lg:min-h-[420px] lg:sticky lg:top-[5.5rem] lg:self-start overflow-hidden`}
+    >
+      {/* collapsed rail (lg+): the whole strip expands the explorer */}
+      {collapsed && (
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-expanded="false"
+          aria-controls="dataset-explorer-body"
+          title="Expand Dataset Explorer"
+          className="explorer-rail-in hidden lg:flex flex-1 flex-col items-center gap-3 py-3 text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition-colors focus:outline-none focus-visible:ring-4 focus-visible:ring-inset focus-visible:ring-blue-500/30"
+        >
+          <span className="w-7 h-7 flex items-center justify-center rounded-md bg-slate-100">
+            <PanelLeftOpen size={15} strokeWidth={2.25} />
+          </span>
+          <span className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center">
+            <FolderTree size={15} strokeWidth={2.25} />
+          </span>
+          <span className="[writing-mode:vertical-rl] rotate-180 text-xs font-semibold tracking-wide whitespace-nowrap">
+            Dataset Explorer
+            {credentials && loadState !== 'error' && <span className="font-normal text-slate-400"> · {total.toLocaleString('en-US')}</span>}
+          </span>
+        </button>
+      )}
+
+      <div className={`flex-1 min-h-0 flex flex-col ${collapsed ? 'lg:hidden' : ''}`}>
       {/* header + search — fixed; only the tree below scrolls */}
-      <div className="px-3.5 pt-3 pb-2.5 border-b border-slate-200 bg-slate-50/70 shrink-0">
-        <div className="flex items-center gap-2.5 mb-2.5">
+      <div className={`px-3.5 pt-3 pb-2.5 bg-slate-50/70 shrink-0 ${collapsed ? '' : 'border-b border-slate-200'}`}>
+        <div className={`flex items-center gap-2.5 ${collapsed ? '' : 'mb-2.5'}`}>
           <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
             <FolderTree size={15} strokeWidth={2.25} />
           </div>
@@ -581,8 +622,25 @@ export default function DatasetExplorer({ credentials, addLog }) {
               <RefreshCw size={14} strokeWidth={2.25} className={loadState === 'loading' ? 'animate-spin' : ''} />
             </button>
           )}
+          {onToggleCollapsed && (
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              aria-expanded={!collapsed}
+              aria-controls="dataset-explorer-body"
+              title={collapsed ? 'Expand Dataset Explorer' : 'Collapse Dataset Explorer'}
+              className="w-7 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-slate-900 hover:bg-slate-200/70 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+            >
+              {/* sideways on wide screens (side panel), up/down when stacked */}
+              <PanelLeftClose size={15} strokeWidth={2.25} className="hidden lg:block" />
+              {collapsed
+                ? <ChevronDown size={16} strokeWidth={2.25} className="lg:hidden" />
+                : <ChevronUp size={16} strokeWidth={2.25} className="lg:hidden" />}
+              <span className="sr-only">{collapsed ? 'Expand Dataset Explorer' : 'Collapse Dataset Explorer'}</span>
+            </button>
+          )}
         </div>
-        <div className="relative">
+        <div className={`relative ${collapsed ? 'hidden' : ''}`}>
           <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
@@ -613,7 +671,8 @@ export default function DatasetExplorer({ credentials, addLog }) {
         </div>
       </div>
 
-      {/* body */}
+      {/* body — hidden, not unmounted, while collapsed */}
+      <div id="dataset-explorer-body" className={`flex-1 min-h-0 flex flex-col ${collapsed ? 'hidden' : ''}`}>
       {!credentials ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center">
           <Database size={28} strokeWidth={1.5} className="text-slate-300" />
@@ -685,6 +744,8 @@ export default function DatasetExplorer({ credentials, addLog }) {
           <span><Kbd>C</Kbd> copy</span>
         </div>
       )}
+      </div>
+      </div>
 
       {/* copy toast */}
       {toast && (

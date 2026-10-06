@@ -1,7 +1,7 @@
 // api/query.js
 // POST /api/query — AEP OAuth → get connection params → execute SQL
 const axios = require('axios')
-const { getAccessToken, pgQuery } = require('./_helpers')
+const { getAccessToken, pgQuery, statementsFromBody } = require('./_helpers')
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -10,8 +10,9 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end()
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME, query } = req.body
-  if (!query || !query.trim()) {
+  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME } = req.body
+  const statements = statementsFromBody(req.body)
+  if (!statements) {
     return res.status(400).json({ error: 'Query cannot be empty.' })
   }
   try {
@@ -32,7 +33,7 @@ module.exports = async (req, res) => {
     const { host, port, dbName, username, token: pgToken } = cpRes.data
     const result = await pgQuery(
       { host, port, database: dbName, user: username, password: pgToken },
-      query.trim()
+      statements
     )
     res.json(result)
   } catch (err) {

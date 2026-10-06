@@ -1,5 +1,7 @@
 require('dotenv').config({ quiet: true })
 const crypto = require('crypto')
+const net = require('net')
+const tls = require('tls')
 const express = require('express')
 const cors = require('cors')
 const axios = require('axios')
@@ -169,6 +171,180 @@ function tenantFromHost(host) {
   return host.split('.')[0]
 }
 
+// ─── postgres execution ──────────────────────────────────────────────────────
+// Every Postgres connection goes through withPgClient, which closes the client
+// in a finally block — on success, SQL errors, timeouts, dropped sockets and
+// client-side cancellation alike — so a failed query never strands a session
+// in the Query Service connection pool.
+
+const PG_CONNECT_TIMEOUT_MS = 15000
+const MAX_STATEMENTS = 100
+
+class QueryCancelledError extends Error {
+  constructor() {
+    super('Query cancelled.')
+    this.cancelled = true
+  }
+}
+
+/**
+ * Ask the server to cancel the statement running on backend `processID`
+ * (protocol CancelRequest, sent on a separate connection — Postgres does not
+ * notice a dropped socket while a query is busy). SSL is negotiated first, as
+ * for the main connection, with a plaintext fallback. Best effort: resolves
+ * once the server closes the cancel connection, or after a short timeout.
+ */
+function sendCancelRequest({ host, port }, processID, secretKey) {
+  const packet = Buffer.alloc(16)
+  packet.writeInt32BE(16, 0)
+  packet.writeInt32BE(80877102, 4) // CancelRequest code
+  packet.writeInt32BE(processID, 8)
+  packet.writeInt32BE(secretKey, 12)
+  const sslRequest = Buffer.alloc(8)
+  sslRequest.writeInt32BE(8, 0)
+  sslRequest.writeInt32BE(80877103, 4) // SSLRequest code
+
+  return new Promise(resolve => {
+    const sock = net.connect(parseInt(port, 10) || 5432, host)
+    let done = false
+    const finish = () => { if (!done) { done = true; sock.destroy(); resolve() } }
+    const timer = setTimeout(finish, 5000)
+    sock.on('error', finish)
+    sock.on('close', () => { clearTimeout(timer); finish() })
+    sock.once('connect', () => sock.write(sslRequest))
+    sock.once('data', (b) => {
+      if (b[0] !== 0x53) return sock.end(packet) // 'N' → server has no SSL, send in plaintext
+      const tlsSock = tls.connect({ socket: sock, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false })
+      tlsSock.on('error', finish)
+      tlsSock.once('secureConnect', () => tlsSock.end(packet))
+    })
+  })
+}
+
+/**
+ * Open a Postgres client, run fn(client), and always close the client.
+ * When `signal` aborts (the browser cancelled the request) the running
+ * statement is cancelled server-side and the client is closed.
+ */
+async function withPgClient({ host, port, database, user, password }, fn, signal) {
+  const client = new Client({
+    host,
+    port: parseInt(port, 10) || 5432,
+    database,
+    user,
+    password: password || '',
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: PG_CONNECT_TIMEOUT_MS,
+  })
+  // An idle socket error must not surface as an unhandled 'error' event and
+  // crash the process; errors during a query reject that query instead.
+  client.on('error', () => {})
+  let closing = null
+  const close = () => (closing ??= client.end().catch(() => {}))
+  const onAbort = async () => {
+    if (client.processID != null && client.secretKey != null) {
+      await sendCancelRequest({ host, port }, client.processID, client.secretKey).catch(() => {})
+    }
+    await close()
+  }
+  let aborting = null
+  const abortListener = () => { aborting = onAbort() }
+  signal?.addEventListener('abort', abortListener, { once: true })
+  try {
+    if (signal?.aborted) throw new QueryCancelledError()
+    await client.connect()
+    return await fn(client)
+  } catch (err) {
+    throw signal?.aborted ? new QueryCancelledError() : err
+  } finally {
+    signal?.removeEventListener('abort', abortListener)
+    await aborting
+    await close()
+  }
+}
+
+/** Aborts when the client disconnects before the response has been sent. */
+function clientAbortSignal(res) {
+  const ac = new AbortController()
+  res.on('close', () => { if (!res.writableEnded) ac.abort() })
+  return ac.signal
+}
+
+/**
+ * Statements to execute from a request body: `queries` (array, as the editor
+ * sends) or a single `query` string. Returns null when there is nothing to run.
+ */
+function statementsFromBody({ queries, query }) {
+  const list = Array.isArray(queries) ? queries : [query]
+  const stmts = list.filter(q => typeof q === 'string').map(q => q.trim()).filter(Boolean)
+  return stmts.length ? stmts : null
+}
+
+/** Postgres error → { error, code?, position?, hint?, detail? } for the client. */
+function pgErrorInfo(err) {
+  const info = { error: err.message || String(err) }
+  if (err.code) info.code = err.code
+  if (err.position) info.position = parseInt(err.position, 10)
+  if (err.hint) info.hint = err.hint
+  if (err.detail) info.detail = err.detail
+  return info
+}
+
+/**
+ * Run statements one at a time on a single connection. A failing statement is
+ * reported and execution continues with the next one; if the connection itself
+ * is lost, the remaining statements are reported as skipped. A statement that
+ * yields several result sets (pg returns an array) produces one entry each.
+ * Returns [{ statement, status: 'success'|'error'|'skipped', columns, rows,
+ *            rowCount, command, duration, error?, … }]
+ */
+async function runStatements(client, statements, signal) {
+  let lost = false
+  client.on('end', () => { lost = true })
+  const results = []
+  for (const statement of statements) {
+    if (signal?.aborted) throw new QueryCancelledError()
+    if (lost) {
+      results.push({ statement, status: 'skipped', error: 'Skipped — the database connection was lost.' })
+      continue
+    }
+    const t0 = Date.now()
+    try {
+      const out = await client.query(statement)
+      const duration = Date.now() - t0
+      for (const r of Array.isArray(out) ? out : [out]) {
+        results.push({
+          statement,
+          status: 'success',
+          command: r.command || null,
+          rowCount: typeof r.rowCount === 'number' ? r.rowCount : null,
+          columns: (r.fields || []).map(f => f.name),
+          rows: r.rows || [],
+          duration,
+        })
+      }
+    } catch (err) {
+      if (signal?.aborted) throw new QueryCancelledError()
+      results.push({ statement, status: 'error', duration: Date.now() - t0, ...pgErrorInfo(err) })
+    }
+  }
+  return results
+}
+
+/** Shared body of /api/query and /api/query/direct. */
+async function executeQueryRequest(res, statements, signal, getPgConfig) {
+  const t0 = Date.now()
+  try {
+    const pgConfig = await getPgConfig()
+    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal), signal)
+    res.json({ results, duration: Date.now() - t0 })
+  } catch (err) {
+    if (signal.aborted || err.cancelled) return // the browser is no longer listening
+    const msg = err.response?.data?.title || err.response?.data?.message || err.message
+    res.status(500).json({ error: msg })
+  }
+}
+
 // ─── routes ──────────────────────────────────────────────────────────────────
 
 /**
@@ -267,17 +443,7 @@ app.post('/api/connect', requireSession, async (req, res) => {
     const { host, port, dbName, username, token: pgToken } = cpRes.data
 
     // 3. Verify Postgres connectivity
-    const client = new Client({
-      host,
-      port,
-      database: dbName,
-      user: username,
-      password: pgToken,
-      ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 15000,
-    })
-    await client.connect()
-    await client.end()
+    await withPgClient({ host, port, database: dbName, user: username, password: pgToken }, () => {})
 
     res.json({ host, port, dbName, username })
   } catch (err) {
@@ -288,58 +454,27 @@ app.post('/api/connect', requireSession, async (req, res) => {
 
 /**
  * POST /api/query
- * Body: { SANDBOX_NAME, query } — credentials come from the session cookie
- * Returns: { columns, rows, duration }
+ * Body: { SANDBOX_NAME, queries: [sql, …] } (or a single `query` string) —
+ * credentials come from the session cookie.
+ * Returns: { results: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
+ * Statements run sequentially on one connection; aborting the request cancels the run.
  */
 app.post('/api/query', requireSession, async (req, res) => {
-  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME, query } = req.body
-  if (!query || !query.trim()) {
-    return res.status(400).json({ error: 'Query cannot be empty.' })
-  }
-  try {
-    const token = await getAccessToken({ API_KEY, CLIENT_SECRET, SCOPES })
+  const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME } = req.body
+  const statements = statementsFromBody(req.body)
+  if (!statements) return res.status(400).json({ error: 'Query cannot be empty.' })
+  if (statements.length > MAX_STATEMENTS) return res.status(400).json({ error: `At most ${MAX_STATEMENTS} statements can run at once.` })
 
-    // Get connection parameters
+  const signal = clientAbortSignal(res)
+  await executeQueryRequest(res, statements, signal, async () => {
+    const token = await getAccessToken({ API_KEY, CLIENT_SECRET, SCOPES })
     const cpRes = await axios.get(
       'https://platform.adobe.io/data/foundation/query/connection_parameters',
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'x-api-key': API_KEY,
-          'x-gw-ims-org-id': IMS_ORG,
-          'x-sandbox-name': SANDBOX_NAME,
-        },
-      }
+      { headers: aepHeaders({ token, API_KEY, IMS_ORG, SANDBOX_NAME }), signal }
     )
-
     const { host, port, dbName, username, token: pgToken } = cpRes.data
-
-    const client = new Client({
-      host,
-      port,
-      database: dbName,
-      user: username,
-      password: pgToken,
-      ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 15000,
-    })
-
-    const t0 = Date.now()
-    await client.connect()
-
-    const result = await client.query(query)
-    const duration = Date.now() - t0
-
-    await client.end()
-
-    const columns = result.fields.map(f => f.name)
-    const rows = result.rows
-
-    res.json({ columns, rows, duration })
-  } catch (err) {
-    const msg = err.response?.data?.title || err.response?.data?.message || err.message
-    res.status(500).json({ error: msg })
-  }
+    return { host, port, database: dbName, user: username, password: pgToken }
+  })
 })
 
 /**
@@ -354,17 +489,7 @@ app.post('/api/connect/direct', async (req, res) => {
     return res.status(400).json({ error: 'host, dbName and user are required.' })
   }
   try {
-    const client = new Client({
-      host,
-      port: parseInt(port, 10) || 5432,
-      database: dbName,
-      user,
-      password: password || '',
-      ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 15000,
-    })
-    await client.connect()
-    await client.end()
+    await withPgClient({ host, port, database: dbName, user, password }, () => {})
     res.json({ host, port, dbName, user })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -373,36 +498,18 @@ app.post('/api/connect/direct', async (req, res) => {
 
 /**
  * POST /api/query/direct
- * Body: { host, port, dbName, user, password, query }
- * Executes a query using raw Postgres credentials — no AEP API calls.
- * Returns: { columns, rows, duration }
+ * Body: { host, port, dbName, user, password, queries: [sql, …] } (or a single `query` string)
+ * Executes statements using raw Postgres credentials — no AEP API calls.
+ * Returns: same shape as /api/query.
  */
 app.post('/api/query/direct', async (req, res) => {
-  const { host, port, dbName, user, password, query } = req.body
-  if (!query || !query.trim()) {
-    return res.status(400).json({ error: 'Query cannot be empty.' })
-  }
-  try {
-    const client = new Client({
-      host,
-      port: parseInt(port, 10) || 5432,
-      database: dbName,
-      user,
-      password: password || '',
-      ssl: { rejectUnauthorized: false },
-      connectionTimeoutMillis: 15000,
-    })
-    const t0 = Date.now()
-    await client.connect()
-    const result = await client.query(query)
-    const duration = Date.now() - t0
-    await client.end()
+  const { host, port, dbName, user, password } = req.body
+  const statements = statementsFromBody(req.body)
+  if (!statements) return res.status(400).json({ error: 'Query cannot be empty.' })
+  if (statements.length > MAX_STATEMENTS) return res.status(400).json({ error: `At most ${MAX_STATEMENTS} statements can run at once.` })
 
-    const columns = result.fields.map(f => f.name)
-    res.json({ columns, rows: result.rows, duration })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
+  const signal = clientAbortSignal(res)
+  await executeQueryRequest(res, statements, signal, async () => ({ host, port, database: dbName, user, password }))
 })
 
 // ─── dataset explorer helpers ────────────────────────────────────────────────
