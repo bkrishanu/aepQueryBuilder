@@ -9,18 +9,21 @@ import { LoaderCircle } from 'lucide-react'
 const VARIANTS = {
   primary:
     'text-white border-blue-700 bg-gradient-to-b from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 ' +
+    'dark:border-blue-600 dark:hover:to-blue-600 ' +
     'shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_1px_2px_rgba(30,64,175,0.35)] focus-visible:ring-blue-500/40',
   success:
     'text-white border-emerald-700 bg-gradient-to-b from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 ' +
+    'dark:border-emerald-600 dark:hover:to-emerald-600 ' +
     'shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_1px_2px_rgba(6,95,70,0.35)] focus-visible:ring-emerald-500/40',
   stop:
     'text-white border-rose-700 bg-gradient-to-b from-rose-500 to-rose-600 hover:from-rose-600 hover:to-rose-700 ' +
+    'dark:border-rose-600 dark:hover:to-rose-600 ' +
     'shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_1px_2px_rgba(159,18,57,0.35)] focus-visible:ring-rose-500/40',
   danger:
-    'text-rose-600 border-rose-200 bg-white hover:bg-rose-50 hover:border-rose-300 hover:text-rose-700 ' +
+    'text-rose-600 border-rose-200 bg-surface hover:bg-rose-50 hover:border-rose-300 hover:text-rose-700 ' +
     'shadow-[0_1px_2px_rgba(15,23,42,0.06)] focus-visible:ring-rose-500/30',
   secondary:
-    'text-slate-700 border-slate-300 bg-white hover:bg-slate-50 hover:border-slate-400 hover:text-slate-900 ' +
+    'text-slate-700 border-slate-300 bg-surface hover:bg-slate-50 hover:border-slate-400 hover:text-slate-900 ' +
     'shadow-[0_1px_2px_rgba(15,23,42,0.06)] focus-visible:ring-blue-500/30',
   ghost:
     'text-slate-500 border-transparent bg-transparent hover:bg-slate-100 hover:text-slate-900 focus-visible:ring-blue-500/30',
@@ -87,7 +90,7 @@ export function IconBtn({
       </button>
       <span
         aria-hidden="true"
-        className={`pointer-events-none absolute top-full z-30 mt-1.5 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white shadow-lg opacity-0 transition-opacity duration-150 group-hover/tip:opacity-100 group-hover/tip:delay-300 group-focus-within/tip:opacity-100 ${
+        className={`theme-fixed pointer-events-none absolute top-full z-30 dark:ring-1 dark:ring-white/10 mt-1.5 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white shadow-lg opacity-0 transition-opacity duration-150 group-hover/tip:opacity-100 group-hover/tip:delay-300 group-focus-within/tip:opacity-100 ${
           align === 'end' ? 'right-0' : 'left-1/2 -translate-x-1/2'
         }`}
       >

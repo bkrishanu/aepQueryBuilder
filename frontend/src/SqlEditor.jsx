@@ -3,6 +3,8 @@ import CodeMirror from '@uiw/react-codemirror'
 import { sql } from '@codemirror/lang-sql'
 import { EditorView, keymap, Decoration, WidgetType } from '@codemirror/view'
 import { Prec, StateField, StateEffect } from '@codemirror/state'
+import { syntaxHighlighting } from '@codemirror/language'
+import { oneDarkHighlightStyle } from '@codemirror/theme-one-dark'
 import { resolveStatements, splitStatements } from './sqlStatements.js'
 
 // ─── DBeaver-inspired light theme (white background) ─────────────────────────
@@ -20,17 +22,44 @@ import { resolveStatements, splitStatements } from './sqlStatements.js'
 //   selection    → saturated blue tint    #9ec5fe (focused) / #c9dcf5 (blurred)
 const MONO_FONT = "'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace"
 
-const dbeaverTheme = EditorView.theme(
+// Colours for the light (DBeaver) and dark editor themes. The dark theme pairs
+// with One Dark's syntax colours (oneDarkHighlightStyle).
+const PALETTES = {
+  light: {
+    bg: '#ffffff', text: '#1f2328', caret: '#1f2328',
+    selection: '#c9dcf5', selectionFocused: '#9ec5fe',
+    match: '#fde68a80', matchOutline: '#f59e0b55',
+    activeLine: 'rgba(37, 99, 235, 0.06)', activeLineGutter: '#eef2fb',
+    gutterBg: '#f5f5f5', gutterText: '#999999', gutterBorder: '#dddddd',
+    bracket: '#c8e6c8', bracketOutline: '#4caf50',
+    scrollTrack: '#f5f5f5', scrollThumb: '#cccccc', scrollThumbHover: '#aaaaaa',
+    placeholder: '#aaaaaa',
+    errorMsgBg: '#fff1f2', errorMsgText: '#be123c',
+  },
+  dark: {
+    bg: '#0d1526', text: '#d6deeb', caret: '#e2e8f0',
+    selection: '#1e3a5f', selectionFocused: '#264f80',
+    match: 'rgba(250, 204, 21, 0.18)', matchOutline: 'rgba(250, 204, 21, 0.35)',
+    activeLine: 'rgba(96, 165, 250, 0.07)', activeLineGutter: '#16223a',
+    gutterBg: '#0f182b', gutterText: '#5c6a85', gutterBorder: '#1f2b44',
+    bracket: 'rgba(74, 222, 128, 0.18)', bracketOutline: '#22c55e',
+    scrollTrack: '#0d1526', scrollThumb: '#2a3a57', scrollThumbHover: '#3b4f74',
+    placeholder: '#5c6a85',
+    errorMsgBg: 'rgba(225, 29, 72, 0.12)', errorMsgText: '#fda4af',
+  },
+}
+
+const makeTheme = (c, dark) => EditorView.theme(
   {
     '&': {
-      backgroundColor: '#ffffff',
-      color: '#1f2328',
+      backgroundColor: c.bg,
+      color: c.text,
       fontFamily: MONO_FONT,
       fontSize: '13px',
       height: '100%',
     },
     '.cm-content': {
-      caretColor: '#1f2328',
+      caretColor: c.caret,
       padding: '12px 16px',
       minHeight: '100%',
     },
@@ -42,53 +71,53 @@ const dbeaverTheme = EditorView.theme(
     '.cm-line': { lineHeight: '1.6' },
 
     // cursor
-    '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#1f2328' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: c.caret },
 
     // selection — CodeMirror paints the selection layer *behind* the text, so
     // the active-line background below must stay translucent or it hides it.
     '.cm-selectionBackground, .cm-content ::selection': {
-      backgroundColor: '#c9dcf5',
+      backgroundColor: c.selection,
     },
     // must match the specificity of CodeMirror's base-theme focused selector
     '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, &.cm-focused .cm-content ::selection': {
-      backgroundColor: '#9ec5fe',
+      backgroundColor: c.selectionFocused,
     },
     // other occurrences of the selected word
     '.cm-selectionMatch': {
-      backgroundColor: '#fde68a80',
-      outline: '1px solid #f59e0b55',
+      backgroundColor: c.match,
+      outline: `1px solid ${c.matchOutline}`,
       borderRadius: '2px',
     },
 
     // active line highlight (translucent so selections remain visible)
-    '.cm-activeLine': { backgroundColor: 'rgba(37, 99, 235, 0.06)' },
-    '.cm-activeLineGutter': { backgroundColor: '#eef2fb' },
+    '.cm-activeLine': { backgroundColor: c.activeLine },
+    '.cm-activeLineGutter': { backgroundColor: c.activeLineGutter },
 
     // gutter
     '.cm-gutters': {
-      backgroundColor: '#f5f5f5',
-      color: '#999999',
-      borderRight: '1px solid #dddddd',
+      backgroundColor: c.gutterBg,
+      color: c.gutterText,
+      borderRight: `1px solid ${c.gutterBorder}`,
     },
     '.cm-lineNumbers .cm-gutterElement': { padding: '0 12px 0 8px' },
 
     // matched brackets
     '.cm-matchingBracket': {
-      backgroundColor: '#c8e6c8',
-      outline: '1px solid #4caf50',
+      backgroundColor: c.bracket,
+      outline: `1px solid ${c.bracketOutline}`,
     },
 
     // scrollbar (webkit)
     '.cm-scroller::-webkit-scrollbar': { width: '8px', height: '8px' },
-    '.cm-scroller::-webkit-scrollbar-track': { background: '#f5f5f5' },
+    '.cm-scroller::-webkit-scrollbar-track': { background: c.scrollTrack },
     '.cm-scroller::-webkit-scrollbar-thumb': {
-      background: '#cccccc',
+      background: c.scrollThumb,
       borderRadius: '4px',
     },
-    '.cm-scroller::-webkit-scrollbar-thumb:hover': { background: '#aaaaaa' },
+    '.cm-scroller::-webkit-scrollbar-thumb:hover': { background: c.scrollThumbHover },
 
     // placeholder
-    '.cm-placeholder': { color: '#aaaaaa' },
+    '.cm-placeholder': { color: c.placeholder },
 
     // SQL error reported by the server (see errorField)
     '.cm-sqlError': {
@@ -101,15 +130,18 @@ const dbeaverTheme = EditorView.theme(
       margin: '2px 0 4px',
       padding: '3px 8px',
       borderLeft: '3px solid #e11d48',
-      backgroundColor: '#fff1f2',
-      color: '#be123c',
+      backgroundColor: c.errorMsgBg,
+      color: c.errorMsgText,
       fontSize: '12px',
       lineHeight: '1.5',
       whiteSpace: 'pre-wrap',
     },
   },
-  { dark: false }
+  { dark }
 )
+
+const lightTheme = makeTheme(PALETTES.light, false)
+const darkTheme  = [makeTheme(PALETTES.dark, true), syntaxHighlighting(oneDarkHighlightStyle)]
 
 // SQL token colours — DBeaver style on white background
 const sqlHighlightStyle = [
@@ -227,8 +259,9 @@ function applyError(view, error) {
  * can resolve what to execute. Ctrl+Enter (and Cmd+Enter on macOS) calls
  * `onRun`, the same action as the Run button. `error` (see applyError) marks
  * where the server reported a SQL error and moves the cursor there once.
+ * `dark` switches to the dark editor theme.
  */
-const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, onRun, error }, ref) {
+const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, onRun, error, dark = false }, ref) {
   const cmRef = useRef(null)
   const onRunRef = useRef(onRun)
   useLayoutEffect(() => { onRunRef.current = onRun })
@@ -251,14 +284,14 @@ const SqlEditor = forwardRef(function SqlEditor({ value, onChange, placeholder, 
     if (view) applyError(view, error)
   }, [error])
 
-  // Stable extensions, so CodeMirror is not reconfigured on every render.
+  // Stable extensions, so CodeMirror is only reconfigured when the theme changes.
   const extensions = useMemo(() => [
     sql(),
-    dbeaverTheme,
+    dark ? darkTheme : lightTheme,
     errorField,
     EditorView.lineWrapping,
     runKeymap(() => onRunRef.current?.()),
-  ], [])
+  ], [dark])
 
   return (
     <CodeMirror

@@ -16,6 +16,7 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 - [Dataset Explorer](#dataset-explorer)
 - [Query editor](#query-editor)
 - [Results](#results)
+- [Themes](#themes)
 - [Console log](#console-log)
 - [Security](#security)
 - [Deploying to Vercel](#deploying-to-vercel)
@@ -34,9 +35,13 @@ Connect with AEP API credentials or raw database parameters, browse every datase
 | **Dataset Explorer** | Searchable tree of every customer dataset and Profile Snapshot, grouped into *Profile Enabled*, *Non Profile Enabled*, *Profile Snapshots* (by merge policy), *System* and *Segment Snapshot*; collapses to a slim rail to give the editor more room |
 | **Schema browsing** | Expand a dataset to see its full field hierarchy with datatype icons; copy any fully qualified field path (arrays copied as `field[0]`) |
 | **Query editor** | CodeMirror 6 SQL editor with syntax highlighting and autocompletion; runs the statement under the cursor or every selected statement; **Ctrl+Enter** to run; underlines the token a SQL error points at; fills the window height |
-| **Query control** | Compact icon Run / Cancel buttons with tooltips; Cancel stops the statement on the server where the database allows it (see [Cancelling](#query-results)) |
-| **Multiple tabs** | Up to 5 independent query tabs, each with its own editor and results |
-| **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; pages of 100 rows (up to 10,000 per result set, streamed in batches); duplicate column names kept apart (`_id`, `_id (2)`); JSON / array values shown as JSON with a full-value viewer; sticky headers, 20-row × 5-column viewport; one-click tab-delimited copy for Excel / Sheets |
+| **Query control** | Compact icon Run / Cancel / Explain / History buttons with tooltips; Cancel stops the statement on the server where the database allows it (see [Cancelling](#query-results)); **Explain** shows the plan in a copyable monospace dialog |
+| **Multiple tabs** | Up to 5 independent query tabs, each with its own editor and results; tabs can be renamed and are restored (names, SQL, order, active tab) after a reload |
+| **Query history** | The last 50 executed queries per sandbox or Direct host, with time, duration and row count — load one back into the editor in a click. SQL text only: never results or credentials |
+| **Results grid** | One result block per statement with Success / Failed status and PostgreSQL errors; pages of 100 rows (up to 10,000 per result set, streamed in batches); click-to-sort, per-column text / value filters, resizable and hideable columns, pinned first column; duplicate column names kept apart (`_id`, `_id (2)`); JSON / nested XDM values open in a collapsible tree viewer; sticky headers, 20-row × 5-column viewport; copy (TSV) and **CSV / JSON download** of the rows as displayed |
+| **Connection profiles** | Save Direct Connection host / port / database / user as named profiles (never the password) |
+| **Themes** | Light, Dark or System (follows the OS); remembered across sessions |
+| **Session awareness** | Header countdown for the 1-hour credential session, a one-time warning 10 minutes before it ends with one-click renewal, and an automatic reset when it lapses |
 | **Reliability** | Every Postgres connection is closed on success, error, timeout or cancel — failed queries don't leak Query Service connection slots |
 | **Console** | Timestamped activity log for every connection, query and explorer action |
 
@@ -149,7 +154,7 @@ Any other keys (e.g. `TECHNICAL_ACCOUNT_ID`) are ignored. The credential needs a
 3. **Select a sandbox → Connect** — the header pill turns green and the Dataset Explorer starts loading.
 4. **Disconnect** ends the connection. **Forget** (next to *Secured in session*, available when disconnected) deletes the stored credentials. **Re-upload Config** replaces them.
 
-The credential session lasts **8 hours** and survives page refreshes. When it expires the app resets the AEP state and asks you to upload the config again.
+The credential session lasts **1 hour** and survives page refreshes. The header shows a live countdown (amber in the last 10 minutes, red in the last 2). Ten minutes before the end a warning appears once per session; **Renew session** re-uploads the config — with a config for the same org the sandbox and connection are kept. When the countdown reaches zero the app resets the AEP state straight away (rather than letting the next query fail) and asks you to upload the config again.
 
 ### Mode 2 — Direct Connection
 
@@ -164,6 +169,17 @@ Connect straight to any Postgres-compatible endpoint (including the AEP Query Se
 | Password | `••••••` | Never persisted — re-enter each session |
 
 Host, port, database and user are remembered in `sessionStorage` for the tab's lifetime. SSL is always used. The Dataset Explorer is only available in AEP API mode.
+
+**Saved profiles** — the *Saved Profile* row above the fields keeps reusable connections in `localStorage`:
+
+| Action | Effect |
+|--------|--------|
+| Select a profile | Fills host, port, database and user (still editable). The password is cleared if the user changes |
+| **Save as new** | Saves the current fields under a new name |
+| **Update** | Writes the current fields into the selected profile (enabled once they differ) |
+| **Rename** / **Delete** | Rename or remove the selected profile (delete asks for confirmation) |
+
+Profiles never contain the password, a session token or any other secret. Pasting a connect string (**Fill Fields**) works as before.
 
 ---
 
@@ -264,7 +280,7 @@ The tree always shows plain names; `[0]` appears only in the copied value (and t
 
 ## Query editor
 
-CodeMirror 6 with a DBeaver-style light theme: line numbers, bracket matching, active-line highlight, SQL autocompletion and syntax colours (bold blue keywords, red strings, green numbers, italic comments, purple `NULL` / `TRUE` / `FALSE`). Font: Cascadia Code → Consolas → Courier New.
+CodeMirror 6 with a DBeaver-style light theme: line numbers, bracket matching, active-line highlight, SQL autocompletion and syntax colours (bold blue keywords, red strings, green numbers, italic comments, purple `NULL` / `TRUE` / `FALSE`). In the dark theme it switches to One Dark syntax colours. Font: Cascadia Code → Consolas → Courier New.
 
 On large screens the editor fills the window height (at least 420px) and widens when the Dataset Explorer is collapsed.
 
@@ -275,8 +291,19 @@ On large screens the editor fills the window height (at least 420px) and widens 
 | Add a tab | `+` next to the tabs (hidden once 5 are open) |
 | Switch | Click a tab — editor text and results are preserved |
 | Close | `×` on the tab (the last tab can't be closed) |
+| Rename | Double-click the tab (or focus it and press **F2**), type, **Enter**. **Esc** cancels; an empty name restores *Query N* |
 | Run | **▶ Run** (or **Ctrl+Enter**; **⌘ Enter** also works on macOS) runs the active tab |
 | Cancel | **■ Cancel** appears while a query runs. On plain PostgreSQL it stops any statement. On Query Service it stops `INSERT INTO` and `CREATE TABLE … AS`; a `SELECT` can't be stopped there, so Cancel stops waiting and the query finishes on the server |
+| Explain | The **Explain** icon runs `EXPLAIN <query>` for the same statements Run would execute and shows the plan in a dialog — monospace, indentation preserved, scrollable, with copy. Errors are shown in the dialog; the editor content is never changed |
+| History | The **History** icon opens the recent queries for the current sandbox / host (see [Query history](#query-history)) |
+
+Tabs persist in `localStorage`: after a reload every tab comes back with its name, SQL, order and the active tab selected. Restored queries are **not** run — only the editor state is restored.
+
+### Query history
+
+Every finished run is recorded for its target — the AEP sandbox (per org) or the Direct Connection host / port / database. Each entry keeps the SQL text, when it ran, how long it took, the rows returned and whether it succeeded. The last **50** entries per target are kept (oldest dropped first; re-running a query moves it to the top). Search the list, click an entry to load it into the active tab (it is not run), remove single entries or **Clear history**.
+
+History is stored in `localStorage` and never contains query results, session data, passwords or tokens.
 
 ### What Run / Ctrl+Enter runs
 
@@ -302,7 +329,35 @@ Each tab has **Editor** and **Results** sub-tabs; Results shows a row-count badg
 - A cancelled run shows **Query cancelled**; a run that couldn't start (auth, connection) shows **Query failed** with the reason.
 - Up to **5 columns** share the full width; more columns get a fixed width with horizontal scrolling.
 - Up to **20 rows** are visible; more rows scroll vertically with a sticky header.
-- The **copy** icon on each result block copies it as tab-delimited text with headers — paste directly into Excel or Google Sheets.
+- The **first column is pinned** and stays visible while scrolling sideways (toggle in the column picker).
+
+### Exploring results
+
+All of this works on the rows already fetched — nothing re-runs the query.
+
+| Action | How |
+|--------|-----|
+| Sort | Click a column header: ascending → descending → unsorted (arrow shows the direction). Numbers, including numeric strings, sort by value; nulls sort last |
+| Filter | The filter icon in a header: **Contains…** text search, plus a checklist of values with counts when the column has ≤ 100 distinct values. Active filters are highlighted in the header and listed above the grid as removable chips; the pager shows *filtered from N* |
+| Resize | Drag a header's right edge (or focus it and use ← / →). **Reset widths** in the column picker undoes it |
+| Show / hide columns | The **Columns** icon opens the column picker (search, show all, pin first column) |
+| Full value | Click a long or JSON cell, or double-click any cell. JSON and nested XDM objects / arrays open as a collapsible tree (expand / collapse all) with a raw JSON toggle and copy |
+
+### Copy and download
+
+The icons on each result block act on the rows **as displayed** — visible columns only, with the active filters and sort, across every page:
+
+- **Copy** — tab-delimited text with headers; paste straight into Excel or Google Sheets.
+- **Download CSV** — RFC 4180 CSV with a header row (UTF-8 with BOM so Excel opens it correctly).
+- **Download JSON** — an array of row objects keyed by column name; nested values stay structured.
+
+Files are generated in the browser (`query-results-YYYYMMDD-HHMMSS.csv`); no data is sent anywhere.
+
+---
+
+## Themes
+
+The sun / moon / monitor switch in the header picks **Light**, **Dark** or **System** (follows the OS `prefers-color-scheme`, live). The choice is saved in `localStorage` and applied before the first paint, so reloads don't flash. Colours ease between themes (skipped when the OS asks for reduced motion).
 
 ---
 
@@ -318,7 +373,8 @@ A terminal-style panel at the bottom records every action with a millisecond tim
 |---------|------------------|
 | Config secrets in the browser | The config is posted once to `POST /api/session`, verified with Adobe IMS, encrypted with **AES-256-GCM** and returned as the `aep_session` cookie: **HttpOnly** (page scripts can't read it), **SameSite=Strict** (not sent cross-site), **Secure** over HTTPS, scoped to `/api`. Nothing is written to `sessionStorage` / `localStorage`; config left there by older versions is deleted on load. |
 | Secrets in requests | Credentials are never sent in request bodies. AEP routes decrypt them from the cookie on the server and ignore any credential fields a client sends. |
-| Expiry and tampering | Sessions expire after 8 hours (checked inside the encrypted payload as well as by the cookie). Modified or expired cookies are rejected. **Forget** clears the cookie immediately. |
+| Expiry and tampering | Sessions expire after 1 hour (checked inside the encrypted payload as well as by the cookie). Modified or expired cookies are rejected. **Forget** clears the cookie immediately. |
+| Browser storage | `localStorage` holds only non-sensitive state: the theme, query tabs (names + SQL), query history (SQL text, time, duration, row count, status) and Direct Connection profiles (host, port, database, user). Never query results, passwords, session data or tokens. |
 | Server state | None — sessions are stateless, which suits serverless hosting. Rotating `SESSION_SECRET` signs everyone out. |
 | Access tokens | Never stored. A fresh IMS token is requested per backend call and lives only in memory for that request. |
 | Direct-mode password | Kept in memory only; never written to browser storage. |
@@ -429,14 +485,27 @@ Once the database stops the statement it comes back as `cancelled` and the rest 
 aepQueryBuilder/
 ├── frontend/
 │   ├── src/
-│   │   ├── App.jsx              Layout, configuration card, connection flow, tabs, console
+│   │   ├── App.jsx              Layout, configuration card, connection flow, tabs (persisted), console
 │   │   ├── DatasetExplorer.jsx  Virtualized dataset / schema / merge-policy tree
-│   │   ├── QueryPane.jsx        Editor + results for one query tab
-│   │   ├── SqlEditor.jsx        CodeMirror 6 SQL editor, theme and Ctrl+Enter keymap
+│   │   ├── QueryPane.jsx        Editor + results for one query tab, cell viewer, Explain dialog
+│   │   ├── ResultGrid.jsx       Results table, filter popover, column picker, filter chips
+│   │   ├── resultView.js        Sort / filter / column state of one result set
+│   │   ├── cellValues.js        Cell formatting, sorting, filtering, CSV / JSON / TSV export
+│   │   ├── JsonTree.jsx         Collapsible JSON / XDM tree for the cell viewer
+│   │   ├── Overlay.jsx          Modal and anchored popover primitives
+│   │   ├── SqlEditor.jsx        CodeMirror 6 SQL editor, light / dark themes and Ctrl+Enter keymap
 │   │   ├── sqlStatements.js     Statement splitting and cursor / selection resolution
+│   │   ├── HistoryPanel.jsx     Query history dropdown
+│   │   ├── queryHistory.js      Query history storage (per sandbox / host)
+│   │   ├── ConnectionProfiles.jsx  Saved Direct Connection profile controls
+│   │   ├── profiles.js          Profile storage (no passwords)
+│   │   ├── Session.jsx          Session countdown and expiry warning
+│   │   ├── ThemeToggle.jsx      Light / Dark / System switch
+│   │   ├── theme.js             Theme preference + resolution
+│   │   ├── storage.js           Safe localStorage helpers and keys
 │   │   ├── Button.jsx           Shared button and icon-button (tooltip) components
 │   │   ├── api.js               Shared API client + session-expiry signal
-│   │   └── index.css            Tailwind entry, scrollbars, animations
+│   │   └── index.css            Tailwind entry, theme tokens + dark palette, scrollbars, animations
 │   ├── public/                  Logo and favicons
 │   └── vite.config.js           Vite + Tailwind + /api dev proxy
 ├── backend/
@@ -463,6 +532,7 @@ aepQueryBuilder/
 | [FIX_SET_1.md](docs/FIX_SET_1.md) | Icon controls, Cancel Query, connection-leak fix, multi-statement execution, Ctrl+Enter |
 | [FIX_SET_2.md](docs/FIX_SET_2.md) | Duplicate column names, row limits and paged results streamed in batches |
 | [FIX_SET_3.md](docs/FIX_SET_3.md) | JSON cell rendering and viewer, TSV copy quoting, isExecuting() ref, shared default port, SQL error codes and editor highlighting |
+| [FIX_SET_4.md](docs/FIX_SET_4.md) | Export, query history, persistent / renamable tabs, result-grid exploration, Explain, connection profiles, themes, session countdown |
 | [IMPROVEMENTS.md](docs/IMPROVEMENTS.md) | Codebase review: bugs, security, performance and feature ideas |
 | [frontend-vite-template.md](docs/frontend-vite-template.md) | Original Vite + React template notes |
 
@@ -475,7 +545,7 @@ aepQueryBuilder/
 | *Failed to parse config* | The file must be valid JSON — no trailing commas or comments |
 | *Config rejected: Adobe IMS rejected the credentials* | Check `API_KEY`, `CLIENT_SECRET` and `SCOPES` against the Developer Console credential |
 | *Server misconfigured: SESSION_SECRET … must be set* | Add `SESSION_SECRET` in Vercel and redeploy (see [Deploying](#deploying-to-vercel)) |
-| *Credential session expired* | Sessions last 8 hours, and a backend restart without `SESSION_SECRET` ends them — upload the config again |
+| *Credential session expired* | Sessions last 1 hour (use **Renew session** in the 10-minute warning to extend), and a backend restart without `SESSION_SECRET` ends them — upload the config again |
 | *Connection failed* (AEP) | Confirm the sandbox is active and the credential has Query Service access |
 | *Connection failed* (Direct) | Check host, port, database, user and password |
 | Dataset Explorer is empty | It needs AEP API mode; check the console for Catalog errors and the credential's Catalog access |

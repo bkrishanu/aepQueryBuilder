@@ -21,7 +21,7 @@ app.use(express.json())
 // design: nothing is kept server-side, which also works on serverless hosts.
 
 const SESSION_COOKIE = 'aep_session'
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000
+const SESSION_TTL_MS = 60 * 60 * 1000 // 1 hour — the UI counts down to it and warns 10 minutes before
 const SESSION_AAD    = Buffer.from('aep_session_v1')
 const CRED_FIELDS    = ['API_KEY', 'CLIENT_SECRET', 'SCOPES', 'IMS_ORG']
 

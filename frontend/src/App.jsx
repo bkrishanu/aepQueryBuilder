@@ -1,16 +1,49 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import {
   SlidersHorizontal, Upload, ShieldCheck, Layers, Plug, Unplug, ChevronDown,
-  SquareTerminal, Plus, X, Play, Square, Eraser,
+  SquareTerminal, Plus, X, Play, Square, Eraser, History, ListTree,
 } from 'lucide-react'
-import api, { SESSION_EXPIRED, getServerConfig } from './api.js'
+import api, { SESSION_EXPIRED, getServerConfig, notifySessionExpired } from './api.js'
 import QueryPane from './QueryPane.jsx'
 import DatasetExplorer from './DatasetExplorer.jsx'
 import Btn, { IconBtn } from './Button.jsx'
 import { isRunShortcut, RUN_SHORTCUT, RUN_SHORTCUT_ARIA } from './sqlStatements.js'
+import { useTheme } from './theme.js'
+import ThemeToggle from './ThemeToggle.jsx'
+import { SessionTimer, SessionWarning } from './Session.jsx'
+import HistoryPanel from './HistoryPanel.jsx'
+import { loadHistory, addHistory, removeHistory, clearHistory } from './queryHistory.js'
+import ConnectionProfiles from './ConnectionProfiles.jsx'
+import { loadProfiles, saveProfiles } from './profiles.js'
+import { STORAGE_KEYS, loadJSON, saveJSON } from './storage.js'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 23)
+
+// ─── query tabs ──────────────────────────────────────────────────────────────
+// Tabs (name, SQL, order) and the active tab are saved to localStorage and
+// restored on reload. Only editor state comes back — nothing is re-run.
+const MAX_PANES = 5
+const MAX_TAB_NAME = 40
+
+/** Saved tabs → { panes: [{ id, label, custom }], sql: { [id]: text }, active }, or null. */
+function loadSavedTabs() {
+  const saved = loadJSON(STORAGE_KEYS.tabs, null)
+  if (!saved || !Array.isArray(saved.tabs)) return null
+  const seen = new Set()
+  const tabs = saved.tabs
+    .filter(t => t && Number.isFinite(t.id) && typeof t.name === 'string' && !seen.has(t.id) && seen.add(t.id))
+    .slice(0, MAX_PANES)
+  if (!tabs.length) return null
+  return {
+    panes: tabs.map((t, i) => {
+      const name = t.name.trim().slice(0, MAX_TAB_NAME)
+      return { id: t.id, label: name || `Query ${i + 1}`, custom: !!t.custom && !!name }
+    }),
+    sql: Object.fromEntries(tabs.map(t => [t.id, typeof t.sql === 'string' ? t.sql : ''])),
+    active: Math.min(Math.max(0, Number(saved.active) || 0), tabs.length - 1),
+  }
+}
 
 // Parses a Postgres connect string into { host, port, dbName, user, password, sslmode }.
 // Accepts the libpq key=value form — optionally wrapped as `psql "…"`, as AEP's
@@ -87,10 +120,10 @@ function parseConnectString(raw) {
 // Palette: derived from the project logo (public/favicon.svg) —
 // deep navy brand (#0F172A → #1E3A8A), sky accent (#0EA5E9), slate neutrals.
 const C = {
-  pageBg:       'bg-[#f4f6fb]',
-  cardBg:       'bg-white',
+  pageBg:       'bg-[var(--page-bg)]',
+  cardBg:       'bg-surface',
   cardBorder:   'border-slate-200',
-  inputBg:      'bg-white',
+  inputBg:      'bg-surface',
   inputBorder:  'border-slate-300',
   labelText:    'text-slate-500',
   bodyText:     'text-slate-700',
@@ -104,7 +137,7 @@ const C = {
   dangerBg:     'bg-rose-600',
   dangerHover:  'hover:bg-rose-700',
   divider:      'border-slate-200',
-  tabActiveBg:  'bg-white',
+  tabActiveBg:  'bg-surface',
   tabActiveText:'text-slate-900',
   tabInactiveText: 'text-slate-500',
   consoleBg:    'bg-[#0b1220]',
@@ -120,12 +153,10 @@ function Logo({ className = 'w-9 h-9' }) {
   return <img src="/favicon.svg" alt="AEP Query Editor logo" className={`${className} shrink-0`} />
 }
 
+const labelCls = `block text-[11px] font-semibold uppercase tracking-wider mb-1.5 ${C.labelText}`
+
 function Label({ children }) {
-  return (
-    <label className={`block text-[11px] font-semibold uppercase tracking-wider mb-1.5 ${C.labelText}`}>
-      {children}
-    </label>
-  )
+  return <label className={labelCls}>{children}</label>
 }
 
 function ReadonlyField({ value, placeholder }) {
@@ -149,9 +180,10 @@ function StatusPill({ status }) {
   }
   const { dot, label } = cfg[status] || cfg.idle
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm whitespace-nowrap">
+    <span title={label} className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-2.5 sm:px-3 py-1 text-xs font-medium text-white backdrop-blur-sm whitespace-nowrap">
       <span className={`w-2 h-2 rounded-full ${dot}`} />
-      {label}
+      {/* dot only on phones, where the header also holds the theme switch and session timer */}
+      <span className="sr-only sm:not-sr-only">{label}</span>
     </span>
   )
 }
@@ -208,14 +240,27 @@ export default function App() {
   const [configCollapsed, setConfigCollapsed] = useState(false)
   const configOpen = connStatus !== 'connected' || !configCollapsed
 
-  // ── multi-pane state ─────────────────────────────────────────────────────
-  const MAX_PANES = 5
-  const mkPane = (n) => ({ id: Date.now() + n, label: `Query ${n}` })
-  const [panes, setPanes]                 = useState(() => [mkPane(1)])
-  const [activePane, setActivePane]       = useState(0) // index into panes[]
+  // ── theme ────────────────────────────────────────────────────────────────
+  const [themePref, setThemePref, resolvedTheme] = useTheme()
+  const dark = resolvedTheme === 'dark'
+
+  // ── multi-pane state (restored from localStorage) ────────────────────────
+  const [savedTabs]                       = useState(loadSavedTabs)
+  const [panes, setPanes]                 = useState(() => savedTabs?.panes ?? [{ id: Date.now() + 1, label: 'Query 1', custom: false }])
+  const [activePane, setActivePane]       = useState(savedTabs?.active ?? 0) // index into panes[]
   const paneRefs                          = useRef({})  // keyed by pane.id
+  const paneSql                           = useRef(savedTabs?.sql ?? {}) // pane.id → editor text, for persistence
   const [runningPanes, setRunningPanes]   = useState({}) // pane.id → 'running' | 'cancelling' while its query runs
   const tabBarRef                         = useRef(null)
+  const [renaming, setRenaming]           = useState(null) // id of the tab whose name is being edited
+  const renameCancelled                   = useRef(false)
+
+  // ── query history / session warning / profiles ───────────────────────────
+  const [historyAnchor, setHistoryAnchor] = useState(null) // History button while the panel is open
+  const [historyCache, setHistoryCache]   = useState({ target: null, list: [] }) // stored history of one target
+  const [sessionWarning, setSessionWarning] = useState(false)
+  const renewingRef                       = useRef(false)   // next config upload renews the session
+  const [profiles, setProfilesState]      = useState(loadProfiles)
 
   // Dataset Explorer collapse — only offered while connected (AEP mode)
   const [explorerCollapsed, setExplorerCollapsed] = useState(false)
@@ -272,8 +317,12 @@ export default function App() {
   // The file is parsed only to validate it and is posted straight to the backend,
   // which verifies it with Adobe IMS and seals it into an HttpOnly cookie. Nothing
   // from it is kept in browser storage or React state except IMS_ORG.
+  // A renewal (Renew session in the expiry warning) with a config for the same
+  // org keeps the sandbox list and connection; only the session is replaced.
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0]
+    const renewing = renewingRef.current
+    renewingRef.current = false
     if (!file) return
     // reset input so same file can be re-uploaded
     e.target.value = ''
@@ -290,10 +339,14 @@ export default function App() {
       addLog('info', `Verifying config ${file.name} with Adobe IMS…`)
       try {
         const res = await api.post('/session', parsed)
-        resetAepState()
+        const keep = renewing && session && res.data.IMS_ORG === session.IMS_ORG
+        if (!keep) resetAepState()
         setSession(res.data)
         setOrg(res.data.IMS_ORG || '')
-        addLog('info', `Config verified and secured in an encrypted session (expires ${new Date(res.data.expiresAt).toLocaleTimeString()}).`)
+        setSessionWarning(false)
+        addLog('info', keep
+          ? `Session renewed — now expires ${new Date(res.data.expiresAt).toLocaleTimeString()}.`
+          : `Config verified and secured in an encrypted session (expires ${new Date(res.data.expiresAt).toLocaleTimeString()}).`)
       } catch (err) {
         addLog('error', `Config rejected: ${err.response?.data?.error || err.message}`)
       } finally {
@@ -317,6 +370,7 @@ export default function App() {
     const onExpired = () => {
       setSession(null)
       setOrg('')
+      setSessionWarning(false)
       setConnStatus(s => (connMode === 'aep' ? 'idle' : s))
       addLog('warn', 'Credential session expired — please re-upload your config file.')
     }
@@ -426,19 +480,87 @@ export default function App() {
   ), [connMode, connStatus, session, selectedSandbox])
   const explorerIsCollapsed = explorerCollapsed && !!explorerCreds
 
+  // ── session expiry countdown ─────────────────────────────────────────────
+  // The countdown reached zero: reset now rather than let the next query fail
+  // on the expired cookie (the SESSION_EXPIRED handler above does the reset).
+  const handleSessionLapsed = useCallback(() => notifySessionExpired(), [])
+  const sessionLapsed = () => connMode === 'aep' && !!session && session.expiresAt <= Date.now()
+
+  // Renew from the expiry warning: re-upload the config (see handleFileUpload)
+  const handleRenewSession = () => {
+    renewingRef.current = true
+    fileInputRef.current?.click()
+  }
+
   // ── execute query (delegates to active pane ref) ─────────────────────────
-  const handleExecute = () => {
-    if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return }
+  // endpoint + payload for the current connection
+  const queryTarget = () => (connMode === 'direct'
+    ? { endpoint: '/query/direct', payload: { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd } }
+    : { endpoint: '/query', payload: { SANDBOX_NAME: selectedSandbox } })
+
+  // the active pane's handle when it can start a request, else null (and says why)
+  const readyPane = () => {
+    if (connStatus !== 'connected') { addLog('error', 'Not connected. Please connect first.'); return null }
+    if (sessionLapsed()) { handleSessionLapsed(); return null }
     const pane = panes[activePane]
-    if (!pane) return
-    const paneRef = paneRefs.current[pane.id]
+    return (pane && paneRefs.current[pane.id]) || null
+  }
+
+  const handleExecute = () => {
+    const paneRef = readyPane()
     // isExecuting() reads the pane's live ref — runningPanes state can lag a fast double Ctrl+Enter
     if (!paneRef || paneRef.isExecuting()) return // already running — no double execution
-    const endpoint = connMode === 'direct' ? '/query/direct' : '/query'
-    const payload  = connMode === 'direct'
-      ? { host: directHost, port: directPort, dbName: directDb, user: directUser, password: directPwd }
-      : { SANDBOX_NAME: selectedSandbox }
+    const { endpoint, payload } = queryTarget()
     paneRef.execute(endpoint, payload)
+  }
+
+  // ── explain the active pane's query ──────────────────────────────────────
+  const handleExplain = () => {
+    const paneRef = readyPane()
+    if (!paneRef || paneRef.isExecuting() || paneRef.isExplaining()) return
+    const { endpoint, payload } = queryTarget()
+    paneRef.explain(endpoint, payload)
+  }
+
+  // ── query history (per sandbox / Direct host) ────────────────────────────
+  const historyTarget = connMode === 'aep'
+    ? (session?.IMS_ORG && selectedSandbox ? `aep:${session.IMS_ORG}:${selectedSandbox}` : '')
+    : (directHost.trim() ? `direct:${directHost.trim().toLowerCase()}:${shownPort}/${directDb.trim()}` : '')
+  const historyLabel = connMode === 'aep'
+    ? (selectedSandbox ? `Sandbox ${selectedSandbox}` : '')
+    : (directHost.trim() ? `${directHost.trim()}${directDb.trim() ? `/${directDb.trim()}` : ''}` : '')
+  // read from storage only when the target changes (state adjusted during render)
+  let history = historyCache.list
+  if (historyCache.target !== historyTarget) {
+    history = loadHistory(historyTarget)
+    setHistoryCache({ target: historyTarget, list: history })
+  }
+
+  // the target is captured when the run starts (QueryPane keeps that render's callback)
+  const recordHistory = (entry) => {
+    if (!historyTarget) return
+    setHistoryCache({ target: historyTarget, list: addHistory(historyTarget, entry) })
+  }
+
+  const handleHistorySelect = (entry) => {
+    const pane = panes[activePane]
+    paneRefs.current[pane?.id]?.loadQuery(entry.query)
+    setHistoryAnchor(null)
+    addLog('info', `Loaded a query from history into "${pane?.label}" — it has not been run.`)
+  }
+
+  // ── saved Direct Connection profiles ─────────────────────────────────────
+  const setProfiles = (list) => {
+    setProfilesState(list)
+    if (!saveProfiles(list)) addLog('warn', 'Could not save profiles — browser storage is unavailable or full.')
+  }
+
+  const applyProfile = (p) => {
+    setDirectHost(p.host)
+    setDirectPort(p.port)
+    setDirectDb(p.dbName)
+    if (p.user !== directUser) setDirectPwd('') // a password typed for another user doesn't carry over
+    setDirectUser(p.user)
   }
 
   // ── cancel the active pane's running query ───────────────────────────────
@@ -482,10 +604,36 @@ export default function App() {
   const activeRunning    = !!runningPanes[activePaneId]
   const activeCancelling = runningPanes[activePaneId] === 'cancelling'
 
+  // ── tab persistence ──────────────────────────────────────────────────────
+  // Saved on every tab change, shortly after typing stops, and when the page
+  // is hidden or closed. Only names, SQL, order and the active tab are kept.
+  const tabsRef = useRef({ panes, activePane })
+  useLayoutEffect(() => { tabsRef.current = { panes, activePane } })
+  const persistTimer = useRef(0)
+  const persistTabs = useCallback(() => {
+    clearTimeout(persistTimer.current)
+    const { panes: ps, activePane: active } = tabsRef.current
+    saveJSON(STORAGE_KEYS.tabs, {
+      tabs: ps.map(p => ({ id: p.id, name: p.label, custom: !!p.custom, sql: paneSql.current[p.id] ?? '' })),
+      active,
+    })
+  }, [])
+  useEffect(() => { persistTabs() }, [panes, activePane, persistTabs])
+  useEffect(() => {
+    window.addEventListener('pagehide', persistTabs)
+    return () => window.removeEventListener('pagehide', persistTabs)
+  }, [persistTabs])
+
+  const handlePaneQueryChange = (id, text) => {
+    paneSql.current[id] = text
+    clearTimeout(persistTimer.current)
+    persistTimer.current = setTimeout(persistTabs, 400)
+  }
+
   // ── pane management ──────────────────────────────────────────────────────
   const handleAddPane = () => {
     if (panes.length >= MAX_PANES) return
-    const newPane = { id: Date.now(), label: `Query ${panes.length + 1}` }
+    const newPane = { id: Date.now(), label: `Query ${panes.length + 1}`, custom: false }
     const newPanes = [...panes, newPane]
     setPanes(newPanes)
     setActivePane(newPanes.length - 1)
@@ -495,20 +643,53 @@ export default function App() {
     if (panes.length === 1) return // always keep at least one
     const pane = panes[idx]
     delete paneRefs.current[pane.id]
+    delete paneSql.current[pane.id]
     setRunningPanes(prev => { const next = { ...prev }; delete next[pane.id]; return next })
     const newPanes = panes.filter((_, i) => i !== idx)
-    // relabel to keep names tidy
-    const relabeled = newPanes.map((p, i) => ({ ...p, label: `Query ${i + 1}` }))
+    // relabel default names to keep them tidy; renamed tabs keep their names
+    const relabeled = newPanes.map((p, i) => (p.custom ? p : { ...p, label: `Query ${i + 1}` }))
     setPanes(relabeled)
     setActivePane(Math.min(idx, relabeled.length - 1))
+  }
+
+  // Rename: double-click a tab (or F2). An empty name restores the default.
+  const startRename = (id) => {
+    renameCancelled.current = false
+    setRenaming(id)
+  }
+
+  const commitRename = (id, value) => {
+    setRenaming(null)
+    if (renameCancelled.current) return
+    const name = value.trim().slice(0, MAX_TAB_NAME)
+    setPanes(ps => ps.map((p, i) => {
+      if (p.id !== id) return p
+      return name ? { ...p, label: name, custom: true } : { ...p, label: `Query ${i + 1}`, custom: false }
+    }))
+  }
+
+  const onTabKeyDown = (e, idx) => {
+    if (e.target !== e.currentTarget) return // keys typed in the rename field
+    if (e.key === 'F2') { e.preventDefault(); startRename(panes[idx].id) }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActivePane(idx) }
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault()
+      const next = (idx + (e.key === 'ArrowRight' ? 1 : -1) + panes.length) % panes.length
+      setActivePane(next)
+      e.currentTarget.parentElement?.querySelectorAll('[role="tab"]')[next]?.focus()
+    }
   }
 
   // ── render ───────────────────────────────────────────────────────────────
   return (
     <div className={`min-h-screen ${C.pageBg} flex flex-col text-slate-700 antialiased`}>
 
+      {/* config file picker — outside the collapsible card so "Renew session" can open it while collapsed */}
+      <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+
       {/* ── HEADER (sticky — stays visible while page content scrolls) ── */}
-      <header className={`sticky top-0 z-40 ${C.brandGradient} border-b border-white/10 shadow-lg shadow-slate-900/10`}>
+      {/* theme-fixed: the brand header looks the same in light and dark themes */}
+      <header className={`theme-fixed sticky top-0 z-40 ${C.brandGradient} border-b border-white/10 shadow-lg shadow-slate-900/10`}>
         <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <Logo className="w-9 h-9 rounded-[10px] ring-1 ring-white/20 shadow-md" />
@@ -517,9 +698,30 @@ export default function App() {
               <p className="hidden sm:block text-[11px] text-sky-200/70 truncate">Adobe Experience Platform · Query Service</p>
             </div>
           </div>
-          <StatusPill status={connStatus} />
+          <div className="flex items-center gap-2 shrink-0">
+            {/* only while connected — the credential session outlives a disconnect, but the clock is
+                about the working connection; an expiry while disconnected is caught on the next API call */}
+            {connMode === 'aep' && session && connStatus === 'connected' && (
+              <SessionTimer
+                key={session.expiresAt}
+                expiresAt={session.expiresAt}
+                onWarn={() => setSessionWarning(true)}
+                onExpire={handleSessionLapsed}
+              />
+            )}
+            <ThemeToggle value={themePref} onChange={setThemePref} />
+            <StatusPill status={connStatus} />
+          </div>
         </div>
       </header>
+
+      {sessionWarning && connMode === 'aep' && session && connStatus === 'connected' && (
+        <SessionWarning
+          expiresAt={session.expiresAt}
+          onRenew={handleRenewSession}
+          onDismiss={() => setSessionWarning(false)}
+        />
+      )}
 
       <main className="flex flex-col gap-5 px-3 sm:px-6 py-5 sm:py-6 flex-1 max-w-screen-2xl w-full mx-auto">
 
@@ -551,7 +753,7 @@ export default function App() {
                       disabled={connStatus === 'connected'}
                       className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all disabled:cursor-not-allowed ${
                         connMode === id
-                          ? 'bg-white text-blue-700 shadow-sm ring-1 ring-slate-200'
+                          ? 'bg-surface text-blue-700 shadow-sm ring-1 ring-slate-200'
                           : 'text-slate-500 hover:text-slate-800 disabled:hover:text-slate-500'
                       }`}
                     >
@@ -601,8 +803,7 @@ export default function App() {
                 {/* Config File — 3 cols */}
                 <div className="col-span-12 md:col-span-6 lg:col-span-3">
                   <Label>Config File</Label>
-                  <input type="file" accept=".json" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-                  <Btn variant="secondary" icon={Upload} onClick={() => fileInputRef.current?.click()} loading={uploading} className="w-full">
+                  <Btn variant="secondary" icon={Upload} onClick={() => { renewingRef.current = false; fileInputRef.current?.click() }} loading={uploading} className="w-full">
                     {uploading ? 'Verifying…' : session ? 'Re-upload Config' : 'Upload Config JSON'}
                   </Btn>
                   <p className="h-5 mt-1.5 text-[11px] flex items-center gap-1">
@@ -695,6 +896,16 @@ export default function App() {
             <>
             {connStatus !== 'connected' && (
               <>
+                <ConnectionProfiles
+                  profiles={profiles}
+                  onChange={setProfiles}
+                  fields={{ host: directHost, port: directPort, dbName: directDb, user: directUser }}
+                  onApply={applyProfile}
+                  addLog={addLog}
+                  inputClassName={inputCls}
+                  labelClassName={labelCls}
+                />
+                <div className={`border-t ${C.divider} my-4`} />
                 <div className="grid grid-cols-12 gap-x-4 gap-y-3 items-end">
                   <div className="col-span-12 md:col-span-9 lg:col-span-10">
                     <Label>Connect String (optional)</Label>
@@ -835,15 +1046,37 @@ export default function App() {
                   key={pane.id}
                   role="tab"
                   aria-selected={activePane === idx}
+                  tabIndex={activePane === idx ? 0 : -1}
                   onClick={() => setActivePane(idx)}
-                  className={`group flex items-center gap-2 pl-3 ${panes.length > 1 ? 'pr-2' : 'pr-3'} py-1.5 text-sm font-medium rounded-lg border cursor-pointer transition-all select-none whitespace-nowrap ${
+                  onDoubleClick={() => startRename(pane.id)}
+                  onKeyDown={e => onTabKeyDown(e, idx)}
+                  title={renaming === pane.id ? undefined : `${pane.label} — double-click or F2 to rename`}
+                  className={`group flex items-center gap-2 pl-3 ${panes.length > 1 ? 'pr-2' : 'pr-3'} py-1.5 text-sm font-medium rounded-lg border cursor-pointer transition-all select-none whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${
                     activePane === idx
-                      ? `bg-white border-slate-200 ${C.tabActiveText} shadow-sm`
-                      : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-slate-900 hover:bg-white/70`
+                      ? `bg-surface border-slate-200 ${C.tabActiveText} shadow-sm`
+                      : `bg-transparent border-transparent ${C.tabInactiveText} hover:text-slate-900 hover:bg-surface/70`
                   }`}
                 >
                   <SquareTerminal size={15} strokeWidth={2} className={`shrink-0 hidden sm:block ${activePane === idx ? 'text-blue-600' : 'text-slate-400'}`} />
-                  {pane.label}
+                  {renaming === pane.id ? (
+                    <input
+                      autoFocus
+                      defaultValue={pane.label}
+                      maxLength={MAX_TAB_NAME}
+                      aria-label="Tab name"
+                      onFocus={e => e.target.select()}
+                      onClick={e => e.stopPropagation()}
+                      onDoubleClick={e => e.stopPropagation()}
+                      onBlur={e => commitRename(pane.id, e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') e.currentTarget.blur()
+                        else if (e.key === 'Escape') { renameCancelled.current = true; e.currentTarget.blur() }
+                      }}
+                      className="w-32 rounded border border-blue-400 bg-surface px-1.5 py-0 text-sm font-medium text-slate-900 outline-none ring-2 ring-blue-500/20"
+                    />
+                  ) : (
+                    <span className="max-w-[12rem] truncate">{pane.label}</span>
+                  )}
                   {/* close button — only show if more than 1 pane */}
                   {panes.length > 1 && (
                     <button
@@ -871,8 +1104,21 @@ export default function App() {
               )}
             </div>
 
-            {/* Run / Cancel — right-aligned, compact icon controls */}
+            {/* History / Explain / Run / Cancel — right-aligned, compact icon controls */}
             <div className="ml-auto flex items-center gap-1.5 shrink-0">
+              <IconBtn
+                icon={History}
+                label="Query history"
+                onClick={e => { const anchor = e.currentTarget; setHistoryAnchor(a => (a ? null : anchor)) }}
+                align="end"
+              />
+              <IconBtn
+                icon={ListTree}
+                label="Explain — show the plan for the selection, or the statement under the cursor"
+                onClick={handleExplain}
+                disabled={connStatus !== 'connected' || activeRunning}
+                align="end"
+              />
               {activeRunning && (
                 <IconBtn
                   variant="stop"
@@ -907,15 +1153,34 @@ export default function App() {
                 addLog={addLog}
                 onRun={handleExecute}
                 onExecutingChange={running => setRunningPanes(prev => ({ ...prev, [pane.id]: running }))}
+                initialQuery={savedTabs?.sql[pane.id] ?? ''}
+                onQueryChange={text => handlePaneQueryChange(pane.id, text)}
+                onRunComplete={recordHistory}
+                dark={dark}
               />
             </div>
           ))}
         </section>
 
+        {historyAnchor && (
+          <HistoryPanel
+            anchor={historyAnchor}
+            entries={history}
+            targetLabel={historyLabel}
+            onSelect={handleHistorySelect}
+            onRemove={id => setHistoryCache({ target: historyTarget, list: removeHistory(historyTarget, id) })}
+            onClear={() => {
+              setHistoryCache({ target: historyTarget, list: clearHistory(historyTarget) })
+              addLog('info', `Query history cleared for ${historyLabel}.`)
+            }}
+            onClose={() => setHistoryAnchor(null)}
+          />
+        )}
+
         </div>
 
         {/* ── CONSOLE LOG ── */}
-        <section className={`${C.consoleBg} rounded-2xl border ${C.consoleBorder} shadow-sm flex flex-col overflow-hidden`} style={{ height: '200px' }}>
+        <section className={`theme-fixed ${C.consoleBg} rounded-2xl border ${C.consoleBorder} shadow-sm flex flex-col overflow-hidden`} style={{ height: '200px' }}>
           <div className={`flex items-center justify-between px-4 py-2.5 border-b ${C.consoleBorder} bg-[#0f172a] shrink-0`}>
             <div className="flex items-center gap-2">
               <div className="flex gap-1.5">

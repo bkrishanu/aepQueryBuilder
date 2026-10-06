@@ -1,8 +1,165 @@
 @import "tailwindcss";
 
+/* `dark:` utilities follow the `dark` class on <html> (set by src/theme.js), not the media query */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-sans: 'Segoe UI', system-ui, -apple-system, sans-serif;
   --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+}
+
+/* card / panel background — white in light, dark slate in dark (bg-surface, bg-surface/70) */
+@theme inline {
+  --color-surface: var(--surface);
+}
+
+/* ── theme tokens ───────────────────────────────────────────────────────────────
+   Light is the default. The dark theme remaps Tailwind's palette under
+   `.dark body` instead of adding dark: variants to every class: the slate scale
+   is inverted (bg-slate-50 → a dark tint, text-slate-900 → near white), accent
+   tints (50–200) become dark washes of their hue and accent text (700–900)
+   becomes light. 300–600 stay as they are, so solid buttons keep their colour.
+   Elements that are dark in both themes (header, console, tooltips, toasts)
+   carry .theme-fixed, which restores the original palette inside them. */
+:root {
+  --page-bg: #f4f6fb;
+  --surface: #ffffff;
+  --scroll-thumb: #cbd5e1;
+  --scroll-thumb-hover: #94a3b8;
+  --scroll-track: #f8fafc;
+  /* originals, for .theme-fixed islands inside the dark theme */
+  --o-slate-50: var(--color-slate-50);
+  --o-slate-100: var(--color-slate-100);
+  --o-slate-200: var(--color-slate-200);
+  --o-slate-300: var(--color-slate-300);
+  --o-slate-400: var(--color-slate-400);
+  --o-slate-500: var(--color-slate-500);
+  --o-slate-600: var(--color-slate-600);
+  --o-slate-700: var(--color-slate-700);
+  --o-slate-800: var(--color-slate-800);
+  --o-slate-900: var(--color-slate-900);
+  --o-slate-950: var(--color-slate-950);
+  --o-blue-50: var(--color-blue-50); --o-blue-100: var(--color-blue-100); --o-blue-200: var(--color-blue-200); --o-blue-700: var(--color-blue-700); --o-blue-800: var(--color-blue-800); --o-blue-900: var(--color-blue-900);
+  --o-sky-50: var(--color-sky-50); --o-sky-100: var(--color-sky-100); --o-sky-200: var(--color-sky-200); --o-sky-700: var(--color-sky-700); --o-sky-800: var(--color-sky-800); --o-sky-900: var(--color-sky-900);
+  --o-indigo-50: var(--color-indigo-50); --o-indigo-100: var(--color-indigo-100); --o-indigo-200: var(--color-indigo-200); --o-indigo-700: var(--color-indigo-700); --o-indigo-800: var(--color-indigo-800); --o-indigo-900: var(--color-indigo-900);
+  --o-violet-50: var(--color-violet-50); --o-violet-100: var(--color-violet-100); --o-violet-200: var(--color-violet-200); --o-violet-700: var(--color-violet-700); --o-violet-800: var(--color-violet-800); --o-violet-900: var(--color-violet-900);
+  --o-fuchsia-50: var(--color-fuchsia-50); --o-fuchsia-100: var(--color-fuchsia-100); --o-fuchsia-200: var(--color-fuchsia-200); --o-fuchsia-700: var(--color-fuchsia-700); --o-fuchsia-800: var(--color-fuchsia-800); --o-fuchsia-900: var(--color-fuchsia-900);
+  --o-rose-50: var(--color-rose-50); --o-rose-100: var(--color-rose-100); --o-rose-200: var(--color-rose-200); --o-rose-700: var(--color-rose-700); --o-rose-800: var(--color-rose-800); --o-rose-900: var(--color-rose-900);
+  --o-red-50: var(--color-red-50); --o-red-100: var(--color-red-100); --o-red-200: var(--color-red-200); --o-red-700: var(--color-red-700); --o-red-800: var(--color-red-800); --o-red-900: var(--color-red-900);
+  --o-orange-50: var(--color-orange-50); --o-orange-100: var(--color-orange-100); --o-orange-200: var(--color-orange-200); --o-orange-700: var(--color-orange-700); --o-orange-800: var(--color-orange-800); --o-orange-900: var(--color-orange-900);
+  --o-amber-50: var(--color-amber-50); --o-amber-100: var(--color-amber-100); --o-amber-200: var(--color-amber-200); --o-amber-700: var(--color-amber-700); --o-amber-800: var(--color-amber-800); --o-amber-900: var(--color-amber-900);
+  --o-emerald-50: var(--color-emerald-50); --o-emerald-100: var(--color-emerald-100); --o-emerald-200: var(--color-emerald-200); --o-emerald-700: var(--color-emerald-700); --o-emerald-800: var(--color-emerald-800); --o-emerald-900: var(--color-emerald-900);
+  --o-teal-50: var(--color-teal-50); --o-teal-100: var(--color-teal-100); --o-teal-200: var(--color-teal-200); --o-teal-700: var(--color-teal-700); --o-teal-800: var(--color-teal-800); --o-teal-900: var(--color-teal-900);
+}
+
+.dark body {
+  --page-bg: #0a1020;
+  --surface: #111a2e;
+  --scroll-thumb: #334462;
+  --scroll-thumb-hover: #475a7c;
+  --scroll-track: #0e1627;
+
+  --color-slate-50:  #142037;
+  --color-slate-100: #1a2740;
+  --color-slate-200: #25344f;
+  --color-slate-300: #34466a;
+  --color-slate-400: #7d8ba3;
+  --color-slate-500: #94a3b8;
+  --color-slate-600: #b4c0d3;
+  --color-slate-700: #cbd5e1;
+  --color-slate-800: #e2e8f0;
+  --color-slate-900: #f1f5f9;
+  --color-slate-950: #f8fafc;
+  --color-blue-50: color-mix(in oklab, var(--color-blue-500) 12%, var(--surface));
+  --color-blue-100: color-mix(in oklab, var(--color-blue-500) 20%, var(--surface));
+  --color-blue-200: color-mix(in oklab, var(--color-blue-500) 34%, var(--surface));
+  --color-blue-700: var(--color-blue-300); --color-blue-800: var(--o-blue-200); --color-blue-900: var(--o-blue-100);
+  --color-sky-50: color-mix(in oklab, var(--color-sky-500) 12%, var(--surface));
+  --color-sky-100: color-mix(in oklab, var(--color-sky-500) 20%, var(--surface));
+  --color-sky-200: color-mix(in oklab, var(--color-sky-500) 34%, var(--surface));
+  --color-sky-700: var(--color-sky-300); --color-sky-800: var(--o-sky-200); --color-sky-900: var(--o-sky-100);
+  --color-indigo-50: color-mix(in oklab, var(--color-indigo-500) 12%, var(--surface));
+  --color-indigo-100: color-mix(in oklab, var(--color-indigo-500) 20%, var(--surface));
+  --color-indigo-200: color-mix(in oklab, var(--color-indigo-500) 34%, var(--surface));
+  --color-indigo-700: var(--color-indigo-300); --color-indigo-800: var(--o-indigo-200); --color-indigo-900: var(--o-indigo-100);
+  --color-violet-50: color-mix(in oklab, var(--color-violet-500) 12%, var(--surface));
+  --color-violet-100: color-mix(in oklab, var(--color-violet-500) 20%, var(--surface));
+  --color-violet-200: color-mix(in oklab, var(--color-violet-500) 34%, var(--surface));
+  --color-violet-700: var(--color-violet-300); --color-violet-800: var(--o-violet-200); --color-violet-900: var(--o-violet-100);
+  --color-fuchsia-50: color-mix(in oklab, var(--color-fuchsia-500) 12%, var(--surface));
+  --color-fuchsia-100: color-mix(in oklab, var(--color-fuchsia-500) 20%, var(--surface));
+  --color-fuchsia-200: color-mix(in oklab, var(--color-fuchsia-500) 34%, var(--surface));
+  --color-fuchsia-700: var(--color-fuchsia-300); --color-fuchsia-800: var(--o-fuchsia-200); --color-fuchsia-900: var(--o-fuchsia-100);
+  --color-rose-50: color-mix(in oklab, var(--color-rose-500) 12%, var(--surface));
+  --color-rose-100: color-mix(in oklab, var(--color-rose-500) 20%, var(--surface));
+  --color-rose-200: color-mix(in oklab, var(--color-rose-500) 34%, var(--surface));
+  --color-rose-700: var(--color-rose-300); --color-rose-800: var(--o-rose-200); --color-rose-900: var(--o-rose-100);
+  --color-red-50: color-mix(in oklab, var(--color-red-500) 12%, var(--surface));
+  --color-red-100: color-mix(in oklab, var(--color-red-500) 20%, var(--surface));
+  --color-red-200: color-mix(in oklab, var(--color-red-500) 34%, var(--surface));
+  --color-red-700: var(--color-red-300); --color-red-800: var(--o-red-200); --color-red-900: var(--o-red-100);
+  --color-orange-50: color-mix(in oklab, var(--color-orange-500) 12%, var(--surface));
+  --color-orange-100: color-mix(in oklab, var(--color-orange-500) 20%, var(--surface));
+  --color-orange-200: color-mix(in oklab, var(--color-orange-500) 34%, var(--surface));
+  --color-orange-700: var(--color-orange-300); --color-orange-800: var(--o-orange-200); --color-orange-900: var(--o-orange-100);
+  --color-amber-50: color-mix(in oklab, var(--color-amber-500) 12%, var(--surface));
+  --color-amber-100: color-mix(in oklab, var(--color-amber-500) 20%, var(--surface));
+  --color-amber-200: color-mix(in oklab, var(--color-amber-500) 34%, var(--surface));
+  --color-amber-700: var(--color-amber-300); --color-amber-800: var(--o-amber-200); --color-amber-900: var(--o-amber-100);
+  --color-emerald-50: color-mix(in oklab, var(--color-emerald-500) 12%, var(--surface));
+  --color-emerald-100: color-mix(in oklab, var(--color-emerald-500) 20%, var(--surface));
+  --color-emerald-200: color-mix(in oklab, var(--color-emerald-500) 34%, var(--surface));
+  --color-emerald-700: var(--color-emerald-300); --color-emerald-800: var(--o-emerald-200); --color-emerald-900: var(--o-emerald-100);
+  --color-teal-50: color-mix(in oklab, var(--color-teal-500) 12%, var(--surface));
+  --color-teal-100: color-mix(in oklab, var(--color-teal-500) 20%, var(--surface));
+  --color-teal-200: color-mix(in oklab, var(--color-teal-500) 34%, var(--surface));
+  --color-teal-700: var(--color-teal-300); --color-teal-800: var(--o-teal-200); --color-teal-900: var(--o-teal-100);
+}
+
+.dark .theme-fixed {
+  --color-slate-50: var(--o-slate-50);
+  --color-slate-100: var(--o-slate-100);
+  --color-slate-200: var(--o-slate-200);
+  --color-slate-300: var(--o-slate-300);
+  --color-slate-400: var(--o-slate-400);
+  --color-slate-500: var(--o-slate-500);
+  --color-slate-600: var(--o-slate-600);
+  --color-slate-700: var(--o-slate-700);
+  --color-slate-800: var(--o-slate-800);
+  --color-slate-900: var(--o-slate-900);
+  --color-slate-950: var(--o-slate-950);
+  --color-blue-50: var(--o-blue-50); --color-blue-100: var(--o-blue-100); --color-blue-200: var(--o-blue-200); --color-blue-700: var(--o-blue-700); --color-blue-800: var(--o-blue-800); --color-blue-900: var(--o-blue-900);
+  --color-sky-50: var(--o-sky-50); --color-sky-100: var(--o-sky-100); --color-sky-200: var(--o-sky-200); --color-sky-700: var(--o-sky-700); --color-sky-800: var(--o-sky-800); --color-sky-900: var(--o-sky-900);
+  --color-indigo-50: var(--o-indigo-50); --color-indigo-100: var(--o-indigo-100); --color-indigo-200: var(--o-indigo-200); --color-indigo-700: var(--o-indigo-700); --color-indigo-800: var(--o-indigo-800); --color-indigo-900: var(--o-indigo-900);
+  --color-violet-50: var(--o-violet-50); --color-violet-100: var(--o-violet-100); --color-violet-200: var(--o-violet-200); --color-violet-700: var(--o-violet-700); --color-violet-800: var(--o-violet-800); --color-violet-900: var(--o-violet-900);
+  --color-fuchsia-50: var(--o-fuchsia-50); --color-fuchsia-100: var(--o-fuchsia-100); --color-fuchsia-200: var(--o-fuchsia-200); --color-fuchsia-700: var(--o-fuchsia-700); --color-fuchsia-800: var(--o-fuchsia-800); --color-fuchsia-900: var(--o-fuchsia-900);
+  --color-rose-50: var(--o-rose-50); --color-rose-100: var(--o-rose-100); --color-rose-200: var(--o-rose-200); --color-rose-700: var(--o-rose-700); --color-rose-800: var(--o-rose-800); --color-rose-900: var(--o-rose-900);
+  --color-red-50: var(--o-red-50); --color-red-100: var(--o-red-100); --color-red-200: var(--o-red-200); --color-red-700: var(--o-red-700); --color-red-800: var(--o-red-800); --color-red-900: var(--o-red-900);
+  --color-orange-50: var(--o-orange-50); --color-orange-100: var(--o-orange-100); --color-orange-200: var(--o-orange-200); --color-orange-700: var(--o-orange-700); --color-orange-800: var(--o-orange-800); --color-orange-900: var(--o-orange-900);
+  --color-amber-50: var(--o-amber-50); --color-amber-100: var(--o-amber-100); --color-amber-200: var(--o-amber-200); --color-amber-700: var(--o-amber-700); --color-amber-800: var(--o-amber-800); --color-amber-900: var(--o-amber-900);
+  --color-emerald-50: var(--o-emerald-50); --color-emerald-100: var(--o-emerald-100); --color-emerald-200: var(--o-emerald-200); --color-emerald-700: var(--o-emerald-700); --color-emerald-800: var(--o-emerald-800); --color-emerald-900: var(--o-emerald-900);
+  --color-teal-50: var(--o-teal-50); --color-teal-100: var(--o-teal-100); --color-teal-200: var(--o-teal-200); --color-teal-700: var(--o-teal-700); --color-teal-800: var(--o-teal-800); --color-teal-900: var(--o-teal-900);
+}
+
+/* 600-weight accent text is too dark on a dark surface — lift it to 400 */
+.dark .text-blue-600 { color: var(--color-blue-400); }
+.dark .text-sky-600 { color: var(--color-sky-400); }
+.dark .text-indigo-600 { color: var(--color-indigo-400); }
+.dark .text-violet-600 { color: var(--color-violet-400); }
+.dark .text-fuchsia-600 { color: var(--color-fuchsia-400); }
+.dark .text-rose-600 { color: var(--color-rose-400); }
+.dark .text-red-600 { color: var(--color-red-400); }
+.dark .text-orange-600 { color: var(--color-orange-400); }
+.dark .text-amber-600 { color: var(--color-amber-400); }
+.dark .text-emerald-600 { color: var(--color-emerald-400); }
+.dark .text-teal-600 { color: var(--color-teal-400); }
+
+/* colours ease between themes while the theme switches (class added for ~350ms by theme.js) */
+.theme-transition,
+.theme-transition *,
+.theme-transition *::before,
+.theme-transition *::after {
+  transition: background-color 250ms ease, border-color 250ms ease, color 250ms ease, fill 250ms ease, stroke 250ms ease !important;
 }
 
 /* In @layer base so Tailwind utilities (e.g. font-mono) can still override it */
@@ -14,29 +171,37 @@
 
   body {
     margin: 0;
-    background-color: #f4f6fb;
+    background-color: var(--page-bg);
   }
 
   ::selection {
     background-color: #bfdbfe;
     color: #0f172a;
   }
+  .dark ::selection {
+    background-color: #1e40af;
+    color: #f8fafc;
+  }
 }
 
 /* ── scrollbars ─────────────────────────────────────────────────────────────── */
 .results-grid {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 #f8fafc;
+  scrollbar-color: var(--scroll-thumb) var(--scroll-track);
 }
 .results-grid::-webkit-scrollbar { width: 10px; height: 10px; }
-.results-grid::-webkit-scrollbar-track { background: #f8fafc; }
+.results-grid::-webkit-scrollbar-track { background: var(--scroll-track); }
 .results-grid::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--scroll-thumb);
   border-radius: 9999px;
-  border: 2px solid #f8fafc;
+  border: 2px solid var(--scroll-track);
 }
-.results-grid::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-.results-grid::-webkit-scrollbar-corner { background: #f8fafc; }
+.results-grid::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+.results-grid::-webkit-scrollbar-corner { background: var(--scroll-track); }
+
+/* the pinned first column casts a soft edge over cells scrolling under it */
+.results-grid .pinned-col { box-shadow: 4px 0 6px -4px rgb(15 23 42 / 0.18); }
+.dark .results-grid .pinned-col { box-shadow: 4px 0 6px -4px rgb(0 0 0 / 0.6); }
 
 .console-scroll {
   scrollbar-width: thin;
@@ -49,12 +214,11 @@
 /* ── dataset explorer ───────────────────────────────────────────────────────── */
 .explorer-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: var(--scroll-thumb) transparent;
 }
 .explorer-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
-.explorer-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
-.explorer-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-
+.explorer-scroll::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 9999px; }
+.explorer-scroll::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
 /* children of a just-expanded node slide in */
 @keyframes tree-row-in {
   from { opacity: 0; transform: translateY(-4px); }

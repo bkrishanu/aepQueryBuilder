@@ -1,194 +1,27 @@
-import { useState, useRef, useMemo, useCallback, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
+import { useState, useRef, useMemo, useCallback, useEffect, forwardRef, useImperativeHandle } from 'react'
 import api, { isSessionError, notifySessionExpired } from './api.js'
 import {
   LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, TriangleAlert, X, LocateFixed,
+  FileSpreadsheet, FileJson, Columns3, ListTree, Braces,
 } from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
 import Btn, { IconBtn } from './Button.jsx'
+import { Modal } from './Overlay.jsx'
+import JsonTree from './JsonTree.jsx'
+import { ResultsTable, FilterBar, ColumnFilterPopover, ColumnPickerPopover } from './ResultGrid.jsx'
+import { useResultView } from './resultView.js'
+import { cellText, jsonValue, prettyValue, tsvField, toCSV, toJSON, downloadFile, exportFileName } from './cellValues.js'
 import { splitStatements, RUN_SHORTCUT, isQsCancellable, isQueryServiceTarget } from './sqlStatements.js'
 
 // ─── shared design tokens (keep in sync with App.jsx C object) ───────────────
 const C = {
-  cardBg:      'bg-white',
+  cardBg:      'bg-surface',
   cardBorder:  'border-slate-200',
-  inputBg:     'bg-white',
+  inputBg:     'bg-surface',
   mutedText:   'text-slate-400',
   bodyText:    'text-slate-700',
   headingText: 'text-slate-900',
-}
-
-// ─── ResultsTable ─────────────────────────────────────────────────────────────
-// Grid viewport shows at most MAX_VISIBLE_ROWS rows × MAX_VISIBLE_COLS columns.
-//   rows ≤ 20 → grid sizes to its rows (no filler rows, no vertical scrollbar)
-//   rows > 20 → grid height fixed at exactly 20 rows, vertical scroll for the rest
-//   cols ≤ 5  → columns share the full width equally, no horizontal scrollbar
-//   cols > 5  → each column is 1/5 of the width, horizontal scroll for the rest
-const MAX_VISIBLE_ROWS = 20
-const MAX_VISIBLE_COLS = 5
-const HEADER_H = 40
-const ROW_H    = 36
-// Text cells at least this long open the value viewer on click (they're likely truncated)
-const VIEWER_MIN_CHARS = 40
-const TOOLTIP_MAX_CHARS = 1000
-
-// ─── cell values ──────────────────────────────────────────────────────────────
-const isComplex = (v) => v !== null && typeof v === 'object'
-
-/** One-line text for a cell: objects and arrays as compact JSON, scalars unchanged. */
-function cellText(v) {
-  if (v === null || v === undefined) return ''
-  if (isComplex(v)) {
-    try { return JSON.stringify(v) } catch { return String(v) }
-  }
-  return String(v)
-}
-
-/** Full value for the viewer: JSON pretty-printed, including JSON held in a text column. */
-function prettyValue(v) {
-  if (isComplex(v)) {
-    try { return JSON.stringify(v, null, 2) } catch { return String(v) }
-  }
-  if (typeof v === 'string' && /^\s*[[{]/.test(v)) {
-    try {
-      const parsed = JSON.parse(v)
-      if (isComplex(parsed)) return JSON.stringify(parsed, null, 2)
-    } catch { /* not JSON — show as is */ }
-  }
-  return String(v)
-}
-
-const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s)
-
-/**
- * TSV field that pastes back into a single cell (Excel, Google Sheets): values
- * containing a tab, newline, carriage return or double quote are wrapped in
- * double quotes with inner quotes doubled.
- */
-function tsvField(v) {
-  const s = cellText(v)
-  return /[\t\n\r"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-}
-
-/**
- * One page of a result set. `rows` are arrays in column order; `columns` are
- * { name, label } with labels made unique by the server (_id, _id (2)), so
- * columns that share a name each keep their own values.
- */
-function ResultsTable({ columns, rows, rowOffset = 0, onOpenCell }) {
-  const scrollRef = useRef(null)
-  const tableRef  = useRef(null)
-  const [viewportH, setViewportH] = useState(null)
-
-  const colCount = columns.length
-  const rowCount = rows.length
-  const wideMode = colCount > MAX_VISIBLE_COLS
-  const tallMode = rowCount > MAX_VISIBLE_ROWS
-
-  // a new page starts at its first row
-  useLayoutEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = 0
-  }, [rows])
-
-  // When there are more than 20 rows, size the viewport to exactly header + 20
-  // rows, measured from the DOM so borders and any horizontal scrollbar are
-  // accounted for (otherwise the scrollbar would eat into the 20th row).
-  useLayoutEffect(() => {
-    if (!tallMode) return
-    const el = scrollRef.current
-    const table = tableRef.current
-    if (!el || !table) return
-    const measure = () => {
-      const firstHidden = table.tBodies[0]?.rows[MAX_VISIBLE_ROWS]
-      if (!firstHidden || el.offsetParent === null) return // not visible yet
-      const chrome = el.offsetHeight - el.clientHeight // borders + horizontal scrollbar
-      setViewportH(firstHidden.offsetTop + chrome)
-    }
-    measure()
-    // re-measure when the grid becomes visible (e.g. results arrived on a hidden pane)
-    const ro = new ResizeObserver(measure)
-    ro.observe(table)
-    return () => ro.disconnect()
-  }, [rows, columns, tallMode, wideMode])
-
-  // table width as % of the viewport: 100% for ≤5 cols, 20% per column beyond that
-  const tableWidthPct = wideMode ? (colCount / MAX_VISIBLE_COLS) * 100 : 100
-  const colWidthPct   = 100 / colCount
-
-  return (
-    <div
-      ref={scrollRef}
-      className="results-grid relative rounded-lg border border-slate-200 bg-white"
-      style={{
-        overflowX: wideMode ? 'auto' : 'hidden',
-        overflowY: tallMode ? 'auto' : 'hidden',
-        height: tallMode ? (viewportH ?? HEADER_H + MAX_VISIBLE_ROWS * ROW_H) : undefined,
-      }}
-    >
-      <table
-        ref={tableRef}
-        className="border-separate border-spacing-0 text-sm"
-        style={{ width: `${tableWidthPct}%`, tableLayout: 'fixed' }}
-      >
-        <colgroup>
-          {columns.map((col, ci) => <col key={ci} style={{ width: `${colWidthPct}%` }} />)}
-        </colgroup>
-        <thead>
-          <tr>
-            {columns.map((col, ci) => (
-              <th
-                key={ci}
-                title={col.label === col.name ? col.name : `${col.label} — another column is also named "${col.name}"`}
-                className={`sticky top-0 z-10 bg-slate-100 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-600 border-b border-slate-200 whitespace-nowrap overflow-hidden text-ellipsis ${ci < colCount - 1 ? 'border-r border-r-slate-200' : ''}`}
-                style={{ height: `${HEADER_H}px` }}
-              >
-                {col.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr
-              key={rowOffset + i}
-              className={`group transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'} hover:bg-blue-50/70`}
-            >
-              {columns.map((col, ci) => {
-                const v = row[ci]
-                const isNull = v === null || v === undefined
-                const complex = isComplex(v)
-                const text = cellText(v)
-                const viewable = complex || text.length >= VIEWER_MIN_CHARS
-                return (
-                  <td
-                    key={ci}
-                    title={isNull ? 'null' : clip(viewable ? prettyValue(v) : text, TOOLTIP_MAX_CHARS)}
-                    className={`px-4 text-slate-700 whitespace-nowrap overflow-hidden text-ellipsis ${i < rowCount - 1 ? 'border-b border-slate-100' : ''} ${ci < colCount - 1 ? 'border-r border-r-slate-100' : ''}`}
-                    style={{ height: `${ROW_H}px` }}
-                  >
-                    {isNull
-                      ? <span className="text-slate-400 italic text-xs">null</span>
-                      : viewable
-                        ? (
-                          <button
-                            type="button"
-                            onClick={() => onOpenCell?.({ column: col.label, row: rowOffset + i + 1, value: v })}
-                            aria-label={`View full value of ${col.label}, row ${rowOffset + i + 1}`}
-                            className={`block w-full truncate text-left cursor-zoom-in rounded-sm hover:underline decoration-dotted underline-offset-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${complex ? 'font-mono text-[12px] text-slate-600' : ''}`}
-                          >
-                            {text}
-                          </button>
-                        )
-                        : text}
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
 }
 
 // ─── result helpers ───────────────────────────────────────────────────────────
@@ -253,6 +86,13 @@ async function streamQuery(endpoint, body, signal, onMessage) {
 // Exposes execute(endpoint, payload) and cancel() via ref so the parent toolbar
 // (Run / Cancel buttons, Ctrl+Enter) can drive it; onExecutingChange reports
 // false | 'running' | 'cancelling'. onRun is wired to the editor's Ctrl+Enter.
+// Also exposes explain(endpoint, payload) — runs EXPLAIN for the statements
+// that Run would execute and shows the plan in a dialog — and loadQuery(text),
+// which replaces the editor content (query history).
+//
+// The SQL starts as `initialQuery` (a restored tab); every edit is reported
+// through onQueryChange so the parent can persist it. onRunComplete receives
+// { query, duration, rowCount, status } after each finished run (history).
 //
 // Cancel sends the run's cancel token and the running statement to
 // /api/query/cancel (Postgres CancelRequest + Query Service API cancel), then
@@ -275,8 +115,10 @@ async function streamQuery(endpoint, body, signal, onMessage) {
 //            duration, limits: { maxRows, pageSize }, runId }
 //        | { cancelled: true, unconfirmed?: true, detached?: true }
 //        | { error }   — the request itself failed (auth, connection, …)
-const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onRun }, ref) {
-  const [query, setQuery]         = useState('')
+const QueryPane = forwardRef(function QueryPane({
+  addLog, onExecutingChange, onRun, initialQuery = '', onQueryChange, onRunComplete, dark = false,
+}, ref) {
+  const [query, setQuery]         = useState(initialQuery)
   const [results, setResults]     = useState(null)
   const [executing, setExecuting] = useState(false)
   const [startedAt, setStartedAt] = useState(null)
@@ -291,6 +133,9 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   const runRef     = useRef(null)  // { ac, token, cancelRequested, timer } of the run in flight
   const detachedRef = useRef(new Set()) // cancelled runs still read in the background
   const runningRef = useRef(false) // synchronous guard: state updates land too late to stop a double run
+  // EXPLAIN dialog: null | { loading, startedAt, items: [{ statement, status, plan, error, code, hint }], error }
+  const [explain, setExplain] = useState(null)
+  const explainRef = useRef(null)  // AbortController of the EXPLAIN request in flight
 
   useEffect(() => {
     if (copiedKey === null) return
@@ -421,6 +266,89 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     })
   }
 
+  // EXPLAIN for the statements Run would execute (the selection, or the one
+  // under the cursor). The editor text, results and error marks are untouched.
+  const runExplain = async (endpoint, payload) => {
+    if (explainRef.current) return
+    const plan = editorRef.current?.getStatementsToRun() ?? { statements: splitStatements(query) }
+    const statements = plan.statements.map(s => s.text.replace(/;\s*$/, '').trim()).filter(Boolean)
+    if (!statements.length) { addLog('warn', 'Query is empty — nothing to explain.'); return }
+    const queries = statements.map(s => (/^\s*explain\b/i.test(s) ? s : `EXPLAIN ${s}`))
+
+    const ac = new AbortController()
+    explainRef.current = ac
+    setExplain({ loading: true, startedAt: Date.now(), items: [] })
+    addLog('info', statements.length === 1 ? `Explaining: ${preview(statements[0])}` : `Explaining ${statements.length} statements…`)
+    const rowsBySeq = []
+    let done = null
+    try {
+      await streamQuery(endpoint, { ...payload, queries }, ac.signal, (msg) => {
+        if (msg.type === 'rows') (rowsBySeq[msg.seq] ??= []).push(...msg.rows)
+        else if (msg.type === 'done') done = msg
+        else if (msg.type === 'error') throw new Error(msg.error)
+      })
+      if (!done) throw new Error('The server closed the connection before EXPLAIN finished.')
+      const items = (done.results || []).map((s, seq) => ({
+        statement: statements[s.index] ?? s.statement,
+        status: s.status,
+        // one plan line per row; multi-column output is joined with two spaces
+        plan: s.status === 'success' ? (rowsBySeq[seq] || []).map(r => r.map(cellText).join('  ')).join('\n') : '',
+        error: s.error, code: s.code, hint: s.hint,
+      }))
+      setExplain(e => e && { loading: false, items })
+      const failedCount = items.filter(i => i.status !== 'success').length
+      if (failedCount) items.filter(i => i.status === 'error').forEach(i => addLog('error', `EXPLAIN failed${i.code ? ` [${i.code}]` : ''}: ${i.error}`))
+      else addLog('info', `Explain plan ready (${done.duration}ms).`)
+    } catch (err) {
+      if (err.name === 'AbortError') return // dialog closed
+      setExplain(e => e && { loading: false, items: [], error: err.message })
+      addLog('error', `EXPLAIN failed: ${err.message}`)
+    } finally {
+      if (explainRef.current === ac) explainRef.current = null
+    }
+  }
+
+  const closeExplain = useCallback(() => {
+    explainRef.current?.abort()
+    explainRef.current = null
+    setExplain(null)
+  }, [])
+
+  useEffect(() => () => explainRef.current?.abort(), [])
+
+  // Copies the displayed rows — visible columns, filtered and sorted, every page — as TSV.
+  const handleCopy = ({ labels, rows }, key) => {
+    const lines = [
+      labels.map(tsvField).join('\t'),
+      ...rows.map(r => r.map(tsvField).join('\t')),
+    ]
+    navigator.clipboard.writeText(lines.join('\n'))
+      .then(() => {
+        setCopiedKey(key)
+        addLog('info', `${plural(rows.length, 'row')} copied to clipboard (tab-delimited).`)
+      })
+      .catch(err => addLog('error', `Copy failed: ${err.message}`))
+  }
+
+  // Downloads the displayed rows as CSV or JSON, built in the browser.
+  const handleExport = ({ labels, rows }, format, suffix) => {
+    try {
+      if (format === 'csv') downloadFile(exportFileName('csv', suffix), toCSV(labels, rows), 'text/csv;charset=utf-8')
+      else downloadFile(exportFileName('json', suffix), toJSON(labels, rows), 'application/json')
+      addLog('info', `${plural(rows.length, 'row')} × ${plural(labels.length, 'column')} downloaded as ${format.toUpperCase()}.`)
+    } catch (err) {
+      addLog('error', `Download failed: ${err.message}`)
+    }
+  }
+
+  const closeViewer = useCallback(() => setViewCell(null), [])
+
+  const handleQueryChange = (text) => {
+    setQuery(text)
+    setEditorError(null) // positions no longer match once the SQL changes
+    onQueryChange?.(text)
+  }
+
   useImperativeHandle(ref, () => ({
     execute: async (endpoint, payload) => {
       if (runningRef.current) return // a run is in flight — ignore repeated Run / Ctrl+Enter
@@ -494,6 +422,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
         if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
           addLog('warn', 'The query finished before the cancel took effect.')
         }
+        onRunComplete?.({
+          query: statements.join('\n\n'),
+          duration: done.duration,
+          rowCount: sets.reduce((n, s) => n + (s.status !== 'success' ? 0 : s.columns.length ? s.rows.length : (s.rowCount ?? 0)), 0),
+          status: sets.some(s => s.status === 'cancelled') ? 'cancelled' : sets.some(s => s.status !== 'success') ? 'error' : 'success',
+        })
       } catch (err) {
         if (run.detached) return // the UI has moved on
         if (err.name === 'AbortError') {
@@ -518,28 +452,13 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     // read from the ref, not `executing` state: this handle may have been created
     // in an earlier render, and state from that render would be stale
     isExecuting: () => runningRef.current,
+    explain: (endpoint, payload) => runExplain(endpoint, payload),
+    isExplaining: () => !!explainRef.current,
+    loadQuery: (text) => {
+      handleQueryChange(text)
+      setActiveTab('editor')
+    },
   }))
-
-  // Copies every fetched row (not just the visible page) as TSV.
-  const handleCopy = (set, key) => {
-    const lines = [
-      set.columns.map(c => tsvField(c.label)).join('\t'),
-      ...set.rows.map(r => r.map(tsvField).join('\t')),
-    ]
-    navigator.clipboard.writeText(lines.join('\n'))
-      .then(() => {
-        setCopiedKey(key)
-        addLog('info', `${plural(set.rows.length, 'row')} copied to clipboard (tab-delimited).`)
-      })
-      .catch(err => addLog('error', `Copy failed: ${err.message}`))
-  }
-
-  const closeViewer = useCallback(() => setViewCell(null), [])
-
-  const handleQueryChange = (text) => {
-    setQuery(text)
-    setEditorError(null) // positions no longer match once the SQL changes
-  }
 
   const sets      = results?.sets
   const failed    = sets ? sets.filter(s => s.status === 'error').length : 0
@@ -610,6 +529,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
                 onChange={handleQueryChange}
                 onRun={onRun}
                 error={editorError}
+                dark={dark}
                 placeholder="SELECT * FROM your_dataset LIMIT 10;"
               />
               </div>
@@ -655,7 +575,8 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
                 title="Results"
                 pageSize={results.limits?.pageSize}
                 copied={copiedKey === 0}
-                onCopy={() => handleCopy(sets[0], 0)}
+                onCopy={view => handleCopy(view, 0)}
+                onExport={(view, format) => handleExport(view, format)}
                 onOpenCell={setViewCell}
                 onShowError={editorError && sets[0].index === 0 ? showErrorInEditor : undefined}
               />
@@ -677,7 +598,8 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
                     multi
                     pageSize={results.limits?.pageSize}
                     copied={copiedKey === i}
-                    onCopy={() => handleCopy(set, i)}
+                    onCopy={view => handleCopy(view, i)}
+                    onExport={(view, format) => handleExport(view, format, `-q${i + 1}`)}
                     onOpenCell={setViewCell}
                     onShowError={editorError && set.status === 'error' && editorError.statement === set.statement && set.position === editorError.position
                       ? showErrorInEditor : undefined}
@@ -690,67 +612,157 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
       </div>
 
       {viewCell && <CellViewer cell={viewCell} onClose={closeViewer} />}
+      {explain && <ExplainDialog explain={explain} onClose={closeExplain} />}
     </div>
   )
 })
 
-/**
- * Modal showing a cell's complete value — JSON pretty-printed — with copy.
- * Closes on Escape, the close button, or a click on the backdrop.
- */
-function CellViewer({ cell, onClose }) {
+/** Copy button with transient "Copied" feedback. */
+function CopyIconBtn({ text, label = 'Copy', align = 'end' }) {
   const [copied, setCopied] = useState(false)
-  const bodyRef = useRef(null)
-  const text = prettyValue(cell.value)
-
-  useEffect(() => {
-    const prev = document.activeElement
-    bodyRef.current?.focus() // arrow keys / PageDown scroll the value
-    const onKey = (e) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      prev?.focus?.()
-    }
-  }, [onClose])
-
   useEffect(() => {
     if (!copied) return
     const t = setTimeout(() => setCopied(false), 1600)
     return () => clearTimeout(t)
   }, [copied])
+  return (
+    <IconBtn
+      size="sm"
+      icon={copied ? Check : Copy}
+      iconClassName={copied ? 'text-emerald-600' : ''}
+      label={copied ? 'Copied' : label}
+      onClick={() => navigator.clipboard.writeText(text).then(() => setCopied(true)).catch(() => {})}
+      align={align}
+    />
+  )
+}
+
+/**
+ * Modal showing a cell's complete value with copy. JSON — objects, arrays and
+ * nested XDM fields, or JSON held in a text column — opens as a collapsible
+ * tree, with a toggle to the pretty-printed text.
+ * Closes on Escape, the close button, or a click on the backdrop.
+ */
+function CellViewer({ cell, onClose }) {
+  const json = useMemo(() => jsonValue(cell.value), [cell.value])
+  const text = useMemo(() => prettyValue(cell.value), [cell.value])
+  const [mode, setMode] = useState(json !== undefined ? 'tree' : 'text') // 'tree' | 'text'
+  const [tree, setTree] = useState({ n: 0, depth: 2 }) // remounting the tree expands / collapses all
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Value of ${cell.column}, row ${cell.row}`}
-        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl"
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2.5">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-slate-900">{cell.column}</p>
-            <p className="text-[11px] text-slate-400 tabular-nums">Row {cell.row.toLocaleString()} · {text.length.toLocaleString()} characters</p>
+    <Modal label={`Value of ${cell.column}, row ${cell.row}`} onClose={onClose}>
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2.5">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-slate-900">{cell.column}</p>
+          <p className="text-[11px] text-slate-400 tabular-nums">Row {cell.row.toLocaleString()} · {text.length.toLocaleString()} characters</p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {json !== undefined && (
+            <div role="radiogroup" aria-label="View as" className="mr-1 flex rounded-md border border-slate-200 bg-slate-100 p-0.5">
+              {[['tree', ListTree, 'Tree'], ['text', Braces, 'JSON']].map(([id, Icon, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={mode === id}
+                  onClick={() => setMode(id)}
+                  className={`flex h-6 items-center gap-1 rounded px-2 text-[11px] font-semibold transition-colors ${mode === id ? 'bg-surface text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
+                >
+                  <Icon size={12} strokeWidth={2.25} /> {label}
+                </button>
+              ))}
+            </div>
+          )}
+          <CopyIconBtn text={text} label="Copy value" />
+          <IconBtn size="sm" icon={X} label="Close (Esc)" onClick={onClose} align="end" />
+        </div>
+      </div>
+      {mode === 'tree' && json !== undefined ? (
+        <>
+          <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-1.5 text-[11px]">
+            <button type="button" onClick={() => setTree(t => ({ n: t.n + 1, depth: Infinity }))} className="font-semibold text-blue-600 hover:underline">Expand all</button>
+            <button type="button" onClick={() => setTree(t => ({ n: t.n + 1, depth: 1 }))} className="font-semibold text-blue-600 hover:underline">Collapse all</button>
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <IconBtn
-              size="sm"
-              icon={copied ? Check : Copy}
-              iconClassName={copied ? 'text-emerald-600' : ''}
-              label={copied ? 'Copied' : 'Copy value'}
-              onClick={() => navigator.clipboard.writeText(text).then(() => setCopied(true)).catch(() => {})}
-              align="end"
-            />
-            <IconBtn size="sm" icon={X} label="Close (Esc)" onClick={onClose} align="end" />
+          {/* focusable so arrow keys / PageDown scroll the value */}
+          <div data-autofocus tabIndex={0} className="min-h-0 flex-1 overflow-auto px-3 py-3 focus:outline-none">
+            <JsonTree key={tree.n} value={json} expandDepth={tree.depth} />
+          </div>
+        </>
+      ) : (
+        <pre data-autofocus tabIndex={0} className="min-h-0 focus:outline-none flex-1 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12px] leading-relaxed text-slate-700">{text}</pre>
+      )}
+    </Modal>
+  )
+}
+
+/**
+ * EXPLAIN output for each explained statement: the plan in a monospace,
+ * scrollable block that keeps its indentation, with copy; errors are shown as
+ * in the results. Closing while it loads abandons the request.
+ */
+function ExplainDialog({ explain, onClose }) {
+  const { loading, items, error } = explain
+  const ok = items.filter(i => i.status === 'success')
+  const allPlans = ok.map(i => (ok.length > 1 ? `-- ${oneLine(i.statement)}\n${i.plan}` : i.plan)).join('\n\n')
+  return (
+    <Modal label="Explain plan" onClose={onClose} className="max-w-5xl">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+            <ListTree size={15} strokeWidth={2.25} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-900">Explain plan</p>
+            <p className="text-[11px] text-slate-400">
+              {loading ? 'Asking the database for its plan…' : items.length > 1 ? plural(items.length, 'statement') : 'Execution plan chosen by the database'}
+            </p>
           </div>
         </div>
-        <pre ref={bodyRef} tabIndex={0} className="min-h-0 focus:outline-none flex-1 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[12px] leading-relaxed text-slate-700">{text}</pre>
+        <div className="flex shrink-0 items-center gap-1">
+          {!loading && allPlans && <CopyIconBtn text={allPlans} label={ok.length > 1 ? 'Copy all plans' : 'Copy plan'} />}
+          <IconBtn size="sm" icon={X} label={loading ? 'Cancel (Esc)' : 'Close (Esc)'} onClick={onClose} align="end" />
+        </div>
       </div>
-    </div>
+      <div data-autofocus tabIndex={-1} className="explorer-scroll min-h-0 flex-1 overflow-y-auto p-4 space-y-4 focus:outline-none">
+        {loading && (
+          <div role="status" className="flex flex-col items-center justify-center gap-3 py-12">
+            <LoaderCircle size={28} strokeWidth={2} className="animate-spin text-blue-600" />
+            <p className="text-sm text-slate-500">Running EXPLAIN… <Elapsed since={explain.startedAt} /></p>
+          </div>
+        )}
+        {!loading && error && <ErrorPanel title="EXPLAIN failed" message={error} />}
+        {!loading && items.map((item, i) => (
+          <section key={i} className="space-y-2">
+            {items.length > 1 && (
+              <code title={item.statement} className="block truncate rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 font-mono text-[12px] text-slate-600">
+                {oneLine(item.statement)}
+              </code>
+            )}
+            {item.status === 'success' ? (
+              <div className="relative">
+                <pre tabIndex={0} className="results-grid max-h-[60vh] overflow-auto whitespace-pre rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-[12px] leading-relaxed text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30">
+                  {item.plan || '(no plan returned)'}
+                </pre>
+                {items.length > 1 && item.plan && (
+                  <div className="absolute right-2 top-2"><CopyIconBtn text={item.plan} label="Copy plan" /></div>
+                )}
+              </div>
+            ) : (
+              <ErrorPanel
+                tone={item.status === 'error' ? 'error' : 'warn'}
+                title={item.status === 'skipped' ? 'Not executed' : 'EXPLAIN failed'}
+                message={item.error}
+                code={item.status === 'error' ? item.code : undefined}
+                hint={item.hint}
+              />
+            )}
+          </section>
+        ))}
+        {!loading && (
+          <p className="text-[11px] text-slate-400">Your query in the editor is unchanged.</p>
+        )}
+      </div>
+    </Modal>
   )
 }
 
@@ -775,24 +787,37 @@ const STATUS_CHIP = {
 const FALLBACK_PAGE_SIZE = 100
 
 /**
- * One statement's outcome: header (title, status, stats, copy) and its table,
- * empty state or error. `multi` adds the status chip, the statement text and
- * a card frame so several result sets read as separate blocks.
- * Rows are shown `pageSize` at a time; paging only slices the rows already
- * fetched, so it never re-runs the query.
+ * One statement's outcome: header (title, status, stats, column picker, copy,
+ * CSV / JSON download) and its table, empty state or error. `multi` adds the
+ * status chip, the statement text and a card frame so several result sets
+ * read as separate blocks.
+ * Rows are shown `pageSize` at a time after the view's filters and sort
+ * (useResultView); paging, sorting and filtering only work on the rows already
+ * fetched, so they never re-run the query. Copy and downloads take the same
+ * view: visible columns, filtered and sorted, every page.
  */
-function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, copied, onCopy, onOpenCell, onShowError }) {
-  const [page, setPage] = useState(0)
+function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, copied, onCopy, onExport, onOpenCell, onShowError }) {
+  const [popover, setPopover] = useState(null) // { type: 'filter', col, anchor } | { type: 'columns', anchor }
+  const view    = useResultView(set)
+  // the page belongs to the rows it was chosen on: a new sort or filter starts at page 1
+  const [paging, setPaging] = useState({ rows: null, page: 0 })
+  const page    = paging.rows === view.viewRows ? paging.page : 0
+  const setPage = (p) => setPaging({ rows: view.viewRows, page: p })
   const ok      = set.status === 'success'
   const hasCols = ok && set.columns.length > 0
   const chip    = STATUS_CHIP[set.status] || STATUS_CHIP.error
   const where   = !ok && set.position ? lineCol(set.statement, set.position) : null
 
-  const total     = ok ? set.rows.length : 0
+  const fetched   = ok ? set.rows.length : 0
+  const total     = ok ? view.viewRows.length : 0
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const current   = Math.min(page, pageCount - 1)
   const first     = current * pageSize
-  const pageRows  = useMemo(() => (ok ? set.rows.slice(first, first + pageSize) : []), [ok, set.rows, first, pageSize])
+  const pageRows  = useMemo(() => view.viewRows.slice(first, first + pageSize), [view.viewRows, first, pageSize])
+
+  const closePopover = useCallback(() => setPopover(null), [])
+  const openFilter = (col, anchor) => setPopover(p => (p?.type === 'filter' && p.col === col ? null : { type: 'filter', col, anchor }))
+  const rowsLabel = plural(total, 'row')
 
   return (
     <section
@@ -810,15 +835,47 @@ function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, c
           <span className="truncate text-[11px] text-slate-400 tabular-nums">{describeSet(set)}</span>
         </div>
         {hasCols && (
-          <IconBtn
-            size="sm"
-            icon={copied ? Check : Copy}
-            iconClassName={copied ? 'text-emerald-600' : ''}
-            label={copied ? 'Copied' : `Copy all ${plural(total, 'row')} (tab-delimited)`}
-            onClick={onCopy}
-            disabled={total === 0}
-            align="end"
-          />
+          <div className="flex shrink-0 items-center gap-1">
+            {fetched > 0 && (
+              <span className="relative">
+                <IconBtn
+                  size="sm"
+                  icon={Columns3}
+                  label={`Columns — ${view.visibleCols.length} of ${set.columns.length} shown`}
+                  onClick={e => { const anchor = e.currentTarget; setPopover(p => (p?.type === 'columns' ? null : { type: 'columns', anchor })) }}
+                  align="end"
+                />
+                {view.visibleCols.length < set.columns.length && (
+                  <span className="pointer-events-none absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-blue-600 ring-2 ring-surface" aria-hidden="true" />
+                )}
+              </span>
+            )}
+            <IconBtn
+              size="sm"
+              icon={copied ? Check : Copy}
+              iconClassName={copied ? 'text-emerald-600' : ''}
+              label={copied ? 'Copied' : `Copy ${rowsLabel} (tab-delimited)`}
+              onClick={() => onCopy(view.exportView())}
+              disabled={total === 0}
+              align="end"
+            />
+            <IconBtn
+              size="sm"
+              icon={FileSpreadsheet}
+              label={`Download CSV — ${rowsLabel}`}
+              onClick={() => onExport(view.exportView(), 'csv')}
+              disabled={total === 0}
+              align="end"
+            />
+            <IconBtn
+              size="sm"
+              icon={FileJson}
+              label={`Download JSON — ${rowsLabel}`}
+              onClick={() => onExport(view.exportView(), 'json')}
+              disabled={total === 0}
+              align="end"
+            />
+          </div>
         )}
       </div>
 
@@ -833,26 +890,43 @@ function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, c
           <TriangleAlert size={14} strokeWidth={2.25} className="mt-px shrink-0 text-amber-600" />
           <span>
             <span className="font-medium">Maximum result limit reached.</span>{' '}
-            Results limited to the first {plural(total, 'row')} — add a LIMIT or WHERE clause to narrow the query.
+            Results limited to the first {plural(fetched, 'row')} — add a LIMIT or WHERE clause to narrow the query.
           </span>
         </div>
       )}
 
-      {ok && total > 0 && (
-        <ResultsTable columns={set.columns} rows={pageRows} rowOffset={first} onOpenCell={onOpenCell} />
+      {ok && fetched > 0 && (
+        <FilterBar columns={set.columns} view={view} onEdit={openFilter} />
+      )}
+      {ok && fetched > 0 && (
+        <ResultsTable
+          columns={set.columns}
+          rows={pageRows}
+          rowOffset={first}
+          view={view}
+          onOpenCell={onOpenCell}
+          onOpenFilter={openFilter}
+        />
+      )}
+      {ok && fetched > 0 && total === 0 && (
+        <p role="status" className="rounded-lg border border-dashed border-slate-200 bg-slate-50/50 px-3 py-4 text-center text-xs text-slate-500">
+          No rows match the active filters.{' '}
+          <button type="button" onClick={view.clearFilters} className="font-semibold text-blue-600 hover:underline">Clear filters</button>
+        </p>
       )}
       {ok && total > 0 && (
         <Pager
           first={first}
           shown={pageRows.length}
           total={total}
+          fetched={fetched}
           page={current}
           pageCount={pageCount}
           truncated={!!set.truncated}
           onPage={setPage}
         />
       )}
-      {ok && total === 0 && (
+      {ok && fetched === 0 && (
         <EmptyState
           compact={multi}
           title="Query executed successfully"
@@ -874,15 +948,36 @@ function ResultSet({ set, title, multi = false, pageSize = FALLBACK_PAGE_SIZE, c
           )}
         />
       )}
+
+      {popover?.type === 'filter' && (
+        <ColumnFilterPopover
+          key={popover.col}
+          anchor={popover.anchor}
+          column={set.columns[popover.col]}
+          col={popover.col}
+          rows={set.rows}
+          view={view}
+          onClose={closePopover}
+        />
+      )}
+      {popover?.type === 'columns' && (
+        <ColumnPickerPopover anchor={popover.anchor} columns={set.columns} view={view} onClose={closePopover} />
+      )}
     </section>
   )
 }
 
-/** "Showing rows 101–200 of 10,000" with first / previous / next / last page controls. */
-function Pager({ first, shown, total, page, pageCount, truncated, onPage }) {
+/**
+ * "Showing rows 101–200 of 10,000" with first / previous / next / last page
+ * controls; notes how many fetched rows the filters hide.
+ */
+function Pager({ first, shown, total, fetched = total, page, pageCount, truncated, onPage }) {
+  const of = total < fetched
+    ? `${total.toLocaleString()} (filtered from ${fetched.toLocaleString()}${truncated ? '+' : ''})`
+    : `${total.toLocaleString()}${truncated ? '+' : ''}`
   const range = pageCount === 1
-    ? `Showing all ${plural(total, 'row')}`
-    : `Showing rows ${(first + 1).toLocaleString()}–${(first + shown).toLocaleString()} of ${total.toLocaleString()}${truncated ? '+' : ''}`
+    ? (total < fetched ? `Showing ${plural(total, 'row')} of ${fetched.toLocaleString()}` : `Showing all ${plural(total, 'row')}`)
+    : `Showing rows ${(first + 1).toLocaleString()}–${(first + shown).toLocaleString()} of ${of}`
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
       <span className="tabular-nums" aria-live="polite">{range}</span>
@@ -925,7 +1020,7 @@ function EmptyState({ icon: Icon, title, text, tone, compact = false }) {
     <div className={`flex-1 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed ${
       warn ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-slate-50/50'
     } ${compact ? 'py-5' : 'py-10'}`}>
-      <div className={`w-10 h-10 rounded-full bg-white border shadow-sm flex items-center justify-center ${
+      <div className={`w-10 h-10 rounded-full bg-surface border shadow-sm flex items-center justify-center ${
         warn ? 'border-amber-200 text-amber-600' : 'border-slate-200 text-slate-400'
       }`}>
         <Icon size={20} strokeWidth={1.75} />

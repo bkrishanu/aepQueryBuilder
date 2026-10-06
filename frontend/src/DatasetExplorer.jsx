@@ -570,7 +570,7 @@ export default function DatasetExplorer({ credentials, addLog, collapsed = false
   return (
     <aside
       aria-label="Dataset Explorer"
-      className={`bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col min-w-0 ${collapsed ? 'h-auto' : 'h-[480px]'} lg:h-[calc(100vh-7rem)] lg:min-h-[420px] lg:sticky lg:top-[5.5rem] lg:self-start overflow-hidden`}
+      className={`bg-surface rounded-2xl border border-slate-200 shadow-sm flex flex-col min-w-0 ${collapsed ? 'h-auto' : 'h-[480px]'} lg:h-[calc(100vh-7rem)] lg:min-h-[420px] lg:sticky lg:top-[5.5rem] lg:self-start overflow-hidden`}
     >
       {/* collapsed rail (lg+): the whole strip expands the explorer */}
       {collapsed && (
@@ -656,7 +656,7 @@ export default function DatasetExplorer({ credentials, addLog, collapsed = false
             }}
             placeholder="Search datasets…"
             disabled={!credentials}
-            className="w-full h-8 rounded-lg border border-slate-300 bg-white pl-8 pr-7 text-[13px] text-slate-700 placeholder-slate-400 shadow-sm transition-colors focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed"
+            className="w-full h-8 rounded-lg border border-slate-300 bg-surface pl-8 pr-7 text-[13px] text-slate-700 placeholder-slate-400 shadow-sm transition-colors focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-50 disabled:cursor-not-allowed"
           />
           {query && (
             <button
@@ -752,7 +752,7 @@ export default function DatasetExplorer({ credentials, addLog, collapsed = false
         <div
           key={toast.id}
           role="status"
-          className="toast-in fixed bottom-5 right-5 z-50 flex items-center gap-2 max-w-[min(420px,calc(100vw-2.5rem))] rounded-lg bg-slate-900 text-white text-xs font-medium px-3.5 py-2.5 shadow-xl shadow-slate-900/20 ring-1 ring-white/10"
+          className="theme-fixed toast-in fixed bottom-5 right-5 z-50 flex items-center gap-2 max-w-[min(420px,calc(100vw-2.5rem))] rounded-lg bg-slate-900 text-white text-xs font-medium px-3.5 py-2.5 shadow-xl shadow-slate-900/20 ring-1 ring-white/10"
         >
           {toast.ok
             ? <Check size={14} strokeWidth={2.5} className="text-emerald-400 shrink-0" />
@@ -775,7 +775,7 @@ function Badge({ className, children }) {
 
 function Kbd({ children }) {
   return (
-    <kbd className="inline-flex items-center justify-center min-w-4 h-4 px-1 mr-0.5 rounded border border-slate-200 bg-white font-sans text-[10px] text-slate-500">
+    <kbd className="inline-flex items-center justify-center min-w-4 h-4 px-1 mr-0.5 rounded border border-slate-200 bg-surface font-sans text-[10px] text-slate-500">
       {children}
     </kbd>
   )
