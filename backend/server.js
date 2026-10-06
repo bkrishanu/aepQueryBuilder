@@ -40,20 +40,20 @@ const SESSION_KEY = (() => {
   return crypto.randomBytes(32)
 })()
 
-function seal(payload) {
+function seal(payload, aad = SESSION_AAD) {
   const iv = crypto.randomBytes(12)
   const cipher = crypto.createCipheriv('aes-256-gcm', SESSION_KEY, iv)
-  cipher.setAAD(SESSION_AAD)
+  cipher.setAAD(aad)
   const ct = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()])
   return Buffer.concat([iv, cipher.getAuthTag(), ct]).toString('base64url')
 }
 
-function unseal(token) {
+function unseal(token, aad = SESSION_AAD) {
   try {
     const buf = Buffer.from(token, 'base64url')
     if (buf.length < 29) return null
     const decipher = crypto.createDecipheriv('aes-256-gcm', SESSION_KEY, buf.subarray(0, 12))
-    decipher.setAAD(SESSION_AAD)
+    decipher.setAAD(aad)
     decipher.setAuthTag(buf.subarray(12, 28))
     const payload = JSON.parse(Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString('utf8'))
     return payload.exp > Date.now() ? payload : null
@@ -191,8 +191,8 @@ class QueryCancelledError extends Error {
  * Ask the server to cancel the statement running on backend `processID`
  * (protocol CancelRequest, sent on a separate connection — Postgres does not
  * notice a dropped socket while a query is busy). SSL is negotiated first, as
- * for the main connection, with a plaintext fallback. Best effort: resolves
- * once the server closes the cancel connection, or after a short timeout.
+ * for the main connection, with a plaintext fallback. Resolves true once the
+ * packet has been written (the protocol sends no reply), false on failure.
  */
 function sendCancelRequest({ host, port }, processID, secretKey) {
   const packet = Buffer.alloc(16)
@@ -207,16 +207,17 @@ function sendCancelRequest({ host, port }, processID, secretKey) {
   return new Promise(resolve => {
     const sock = net.connect(parseInt(port, 10) || 5432, host)
     let done = false
-    const finish = () => { if (!done) { done = true; sock.destroy(); resolve() } }
+    let sent = false
+    const finish = () => { if (!done) { done = true; sock.destroy(); resolve(sent) } }
     const timer = setTimeout(finish, 5000)
     sock.on('error', finish)
     sock.on('close', () => { clearTimeout(timer); finish() })
     sock.once('connect', () => sock.write(sslRequest))
     sock.once('data', (b) => {
-      if (b[0] !== 0x53) return sock.end(packet) // 'N' → server has no SSL, send in plaintext
+      if (b[0] !== 0x53) { sent = true; return sock.end(packet) } // 'N' → no SSL, send in plaintext
       const tlsSock = tls.connect({ socket: sock, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false })
       tlsSock.on('error', finish)
-      tlsSock.once('secureConnect', () => tlsSock.end(packet))
+      tlsSock.once('secureConnect', () => tlsSock.end(packet, () => { sent = true }))
     })
   })
 }
@@ -226,7 +227,7 @@ function sendCancelRequest({ host, port }, processID, secretKey) {
  * When `signal` aborts (the browser cancelled the request) the running
  * statement is cancelled server-side and the client is closed.
  */
-async function withPgClient({ host, port, database, user, password }, fn, signal) {
+async function withPgClient({ host, port, database, user, password }, fn, signal, onConnected) {
   const client = new Client({
     host,
     port: parseInt(port, 10) || 5432,
@@ -253,6 +254,7 @@ async function withPgClient({ host, port, database, user, password }, fn, signal
   try {
     if (signal?.aborted) throw new QueryCancelledError()
     await client.connect()
+    onConnected?.(client)
     return await fn(client)
   } catch (err) {
     throw signal?.aborted ? new QueryCancelledError() : err
@@ -295,14 +297,16 @@ function pgErrorInfo(err) {
  * reported and execution continues with the next one; if the connection itself
  * is lost, the remaining statements are reported as skipped. A statement that
  * yields several result sets (pg returns an array) produces one entry each.
- * Returns [{ statement, status: 'success'|'error'|'skipped', columns, rows,
+ * A statement cancelled through /api/query/cancel ends the run: it is reported
+ * as 'cancelled' and the remaining statements as skipped.
+ * Returns [{ statement, status: 'success'|'error'|'cancelled'|'skipped', columns, rows,
  *            rowCount, command, duration, error?, … }]
  */
 async function runStatements(client, statements, signal) {
   let lost = false
   client.on('end', () => { lost = true })
   const results = []
-  for (const statement of statements) {
+  for (const [i, statement] of statements.entries()) {
     if (signal?.aborted) throw new QueryCancelledError()
     if (lost) {
       results.push({ statement, status: 'skipped', error: 'Skipped — the database connection was lost.' })
@@ -325,24 +329,61 @@ async function runStatements(client, statements, signal) {
       }
     } catch (err) {
       if (signal?.aborted) throw new QueryCancelledError()
+      if (isUserCancel(err)) {
+        // cancelled via /api/query/cancel: report it and run nothing further
+        results.push({ statement, status: 'cancelled', duration: Date.now() - t0, ...pgErrorInfo(err) })
+        const rest = statements.slice(i + 1)
+        for (const s of rest) results.push({ statement: s, status: 'skipped', error: 'Skipped — the run was cancelled.' })
+        break
+      }
       results.push({ statement, status: 'error', duration: Date.now() - t0, ...pgErrorInfo(err) })
     }
   }
   return results
 }
 
-/** Shared body of /api/query and /api/query/direct. */
+/** SQLSTATE 57014 (query_canceled) that isn't a statement_timeout. */
+const isUserCancel = (err) => err?.code === '57014' && !/timeout/i.test(err.message || '')
+
+const CANCEL_AAD = Buffer.from('aep_query_cancel_v1')
+const CANCEL_TOKEN_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * Shared body of /api/query and /api/query/direct. Streams newline-delimited JSON:
+ *   { type: 'started', cancelToken }   — once connected; cancelToken is null when
+ *                                        no SESSION_SECRET is configured
+ *   { type: 'done', results, duration }
+ *   { type: 'error', error }           — the run could not start (auth, connection, …)
+ * The cancel token lets any server instance cancel this run through
+ * /api/query/cancel — on serverless hosts the browser dropping the request is
+ * not reliably reported to the function that is running the query.
+ */
 async function executeQueryRequest(res, statements, signal, getPgConfig) {
   const t0 = Date.now()
+  res.status(200)
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('X-Accel-Buffering', 'no')
+  const send = (obj) => { if (!res.writableEnded) res.write(JSON.stringify(obj) + '\n') }
   try {
     const pgConfig = await getPgConfig()
-    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal), signal)
-    res.json({ results, duration: Date.now() - t0 })
+    const onConnected = (client) => {
+      const canCancel = SESSION_KEY && client.processID != null && client.secretKey != null
+      send({
+        type: 'started',
+        cancelToken: canCancel
+          ? seal({ host: pgConfig.host, port: pgConfig.port, pid: client.processID, key: client.secretKey, exp: Date.now() + CANCEL_TOKEN_TTL_MS }, CANCEL_AAD)
+          : null,
+      })
+    }
+    const results = await withPgClient(pgConfig, client => runStatements(client, statements, signal), signal, onConnected)
+    send({ type: 'done', results, duration: Date.now() - t0 })
   } catch (err) {
-    if (signal.aborted || err.cancelled) return // the browser is no longer listening
-    const msg = err.response?.data?.title || err.response?.data?.message || err.message
-    res.status(500).json({ error: msg })
+    if (!(signal.aborted || err.cancelled)) {
+      send({ type: 'error', error: err.response?.data?.title || err.response?.data?.message || err.message })
+    }
   }
+  res.end()
 }
 
 // ─── routes ──────────────────────────────────────────────────────────────────
@@ -456,8 +497,9 @@ app.post('/api/connect', requireSession, async (req, res) => {
  * POST /api/query
  * Body: { SANDBOX_NAME, queries: [sql, …] } (or a single `query` string) —
  * credentials come from the session cookie.
- * Returns: { results: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
- * Statements run sequentially on one connection; aborting the request cancels the run.
+ * Streams NDJSON (see executeQueryRequest); the final 'done' message carries
+ *   { results: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
+ * Statements run sequentially on one connection; cancel through /api/query/cancel.
  */
 app.post('/api/query', requireSession, async (req, res) => {
   const { API_KEY, CLIENT_SECRET, SCOPES, IMS_ORG, SANDBOX_NAME } = req.body
@@ -475,6 +517,22 @@ app.post('/api/query', requireSession, async (req, res) => {
     const { host, port, dbName, username, token: pgToken } = cpRes.data
     return { host, port, database: dbName, user: username, password: pgToken }
   })
+})
+
+/**
+ * POST /api/query/cancel
+ * Body: { token } — the cancelToken streamed by /api/query or /api/query/direct.
+ * Sends a PostgreSQL CancelRequest for that run's statement. The token is
+ * sealed by this server, so it cannot be forged to target another host.
+ * Returns { sent } — whether the request reached the database server; whether
+ * it was honoured shows up in the original run's results (status 'cancelled').
+ */
+app.post('/api/query/cancel', async (req, res) => {
+  if (!SESSION_KEY) return sessionMisconfigured(res)
+  const t = typeof req.body?.token === 'string' ? unseal(req.body.token, CANCEL_AAD) : null
+  if (!t) return res.status(400).json({ error: 'Invalid or expired cancel token.' })
+  const sent = await sendCancelRequest({ host: t.host, port: t.port }, t.pid, t.key)
+  res.json({ sent })
 })
 
 /**
@@ -500,7 +558,7 @@ app.post('/api/connect/direct', async (req, res) => {
  * POST /api/query/direct
  * Body: { host, port, dbName, user, password, queries: [sql, …] } (or a single `query` string)
  * Executes statements using raw Postgres credentials — no AEP API calls.
- * Returns: same shape as /api/query.
+ * Streams the same NDJSON messages as /api/query.
  */
 app.post('/api/query/direct', async (req, res) => {
   const { host, port, dbName, user, password } = req.body

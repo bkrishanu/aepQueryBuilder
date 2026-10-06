@@ -358,7 +358,7 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 |--------|----------|------|--------|
 | `POST` | `/api/sandboxes` | — | `{ sandboxes: [{ name, title }], tenant }` |
 | `POST` | `/api/connect` | `SANDBOX_NAME` | Verifies Postgres connectivity; `{ host, port, dbName, username }` |
-| `POST` | `/api/query` | `SANDBOX_NAME`, `queries` (array) or `query` | `{ results, duration }` — see below |
+| `POST` | `/api/query` | `SANDBOX_NAME`, `queries` (array) or `query` | NDJSON stream — see [Query results](#query-results) |
 | `POST` | `/api/datasets` | `SANDBOX_NAME`, `knownMergePolicyIds?` | NDJSON stream of `page`, `mergePolicies`, `done` / `error` messages |
 | `POST` | `/api/schema` | `SANDBOX_NAME`, `schemaId` | `{ schemaId, title, fields: [{ name, type, itemType?, arrayDims?, children? }] }` |
 
@@ -367,18 +367,29 @@ Without a valid cookie these return `401 { "code": "SESSION_REQUIRED" }`.
 | Method | Endpoint | Body | Result |
 |--------|----------|------|--------|
 | `POST` | `/api/connect/direct` | `host`, `port`, `dbName`, `user`, `password` | Verifies connectivity |
-| `POST` | `/api/query/direct` | same + `queries` (array) or `query` | `{ results, duration }` |
+| `POST` | `/api/query/direct` | same + `queries` (array) or `query` | NDJSON stream — see [Query results](#query-results) |
+| `POST` | `/api/query/cancel` | `token` (from the `started` message) | Sends a PostgreSQL CancelRequest; `{ sent }`. Works in both modes |
 
 ### Query results
 
-Statements run one after another on a single connection, which is always closed afterwards (success, error or cancel). Each entry in `results` is one result set:
+Statements run one after another on a single connection, which is always closed afterwards (success, error or cancel). The response is newline-delimited JSON:
 
 ```js
-{ statement, status: 'success' | 'error' | 'skipped', columns, rows, rowCount, command, duration,
+{ type: 'started', cancelToken }    // connected; token is null without SESSION_SECRET
+{ type: 'done', results, duration } // the run finished
+{ type: 'error', error }            // the run never started (auth, connection parameters, connection failure)
+```
+
+Each entry in `results` is one result set:
+
+```js
+{ statement, status: 'success' | 'error' | 'cancelled' | 'skipped', columns, rows, rowCount, command, duration,
   error?, position?, hint?, code? }   // error fields only when status !== 'success'
 ```
 
-A SQL error is reported in its entry, not as an HTTP error. `500` means the run never started (auth, connection parameters, connection failure). If the browser aborts the request, the server sends a PostgreSQL CancelRequest for the running statement and closes the connection.
+A SQL error is reported in its entry, not as an HTTP error.
+
+**Cancelling.** Posting the `cancelToken` to `/api/query/cancel` makes the server send a PostgreSQL CancelRequest for the running statement. The token is encrypted with `SESSION_SECRET`, so it can't be forged to target another host. Any server instance can handle the cancel, which matters on Vercel, where the function running the query isn't told when the browser drops the request. Once the database confirms, that statement comes back as `cancelled` and the rest as `skipped`. The editor waits up to 10 seconds for this; otherwise it reports *Cancel not confirmed* — the query may still be running in Query Service. As a fallback, if the request itself is aborted and the server notices, it also cancels and closes the connection.
 
 ---
 
@@ -441,6 +452,7 @@ aepQueryBuilder/
 | Wrong statement runs | Place the cursor inside the statement you want, or select it. End every statement with `;` |
 | Only one of several statements ran | With nothing selected, only the statement under the cursor runs — select all of them to run them in order |
 | A long query won't stop | Click the red **Cancel** icon next to Run (or **Cancel query** in Results); closing the tab or disconnecting also cancels it |
+| *Cancel not confirmed* | The database didn't confirm within 10 seconds, so the query may still be running — check **Queries > Logs** in AEP. The console shows whether the cancel request reached the database server |
 | Dataset Explorer is just a thin strip | It's collapsed — click the strip (or the header arrow on small screens) to expand it |
 | `+` tab button missing | Maximum of 5 tabs — close one first |
 | Vercel: *GitHub user not found* | The commit's author email isn't on your GitHub account — fix `git config user.email` and push a new commit |

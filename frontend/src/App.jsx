@@ -212,7 +212,7 @@ export default function App() {
   const [panes, setPanes]                 = useState(() => [mkPane(1)])
   const [activePane, setActivePane]       = useState(0) // index into panes[]
   const paneRefs                          = useRef({})  // keyed by pane.id
-  const [runningPanes, setRunningPanes]   = useState({}) // pane.id → true while its query runs
+  const [runningPanes, setRunningPanes]   = useState({}) // pane.id → 'running' | 'cancelling' while its query runs
   const tabBarRef                         = useRef(null)
 
   // Dataset Explorer collapse — only offered while connected (AEP mode)
@@ -474,7 +474,8 @@ export default function App() {
   }, [activePane, panes.length])
 
   const activePaneId  = panes[activePane]?.id
-  const activeRunning = !!runningPanes[activePaneId]
+  const activeRunning    = !!runningPanes[activePaneId]
+  const activeCancelling = runningPanes[activePaneId] === 'cancelling'
 
   // ── pane management ──────────────────────────────────────────────────────
   const handleAddPane = () => {
@@ -872,7 +873,8 @@ export default function App() {
                   variant="stop"
                   icon={Square}
                   iconClassName="fill-current"
-                  label="Cancel query"
+                  label={activeCancelling ? 'Cancelling…' : 'Cancel query'}
+                  loading={activeCancelling}
                   onClick={handleCancel}
                   align="end"
                 />

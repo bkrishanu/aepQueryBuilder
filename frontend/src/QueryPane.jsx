@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useLayoutEffect, forwardRef, useImperativeHandle } from 'react'
-import api from './api.js'
+import api, { isSessionError, notifySessionExpired } from './api.js'
 import { LoaderCircle, Copy, Check, Table2, CircleCheck, CircleAlert, OctagonX, Square } from 'lucide-react'
 import SqlEditor from './SqlEditor.jsx'
 import Btn, { IconBtn } from './Button.jsx'
@@ -142,14 +142,57 @@ function describeSet(set) {
   return `${set.command || 'Statement'}${affected} · ${set.duration}ms`
 }
 
+// ─── query streaming ──────────────────────────────────────────────────────────
+// How long Cancel waits for the server to confirm before giving up on the run.
+const CANCEL_CONFIRM_MS = 10000
+
+/**
+ * POST a run to /api/query or /api/query/direct and read its NDJSON stream,
+ * calling onMessage for each message ('started' | 'done' | 'error').
+ */
+async function streamQuery(endpoint, body, signal, onMessage) {
+  const res = await fetch(`/api${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    if (isSessionError(res.status, data)) notifySessionExpired()
+    throw new Error(data.error || `HTTP ${res.status}`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let nl
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl)
+      buf = buf.slice(nl + 1)
+      if (line.trim()) onMessage(JSON.parse(line))
+    }
+  }
+  if (buf.trim()) onMessage(JSON.parse(buf))
+}
+
 // ─── QueryPane ────────────────────────────────────────────────────────────────
 // Exposes execute(endpoint, payload) and cancel() via ref so the parent toolbar
-// (Run / Cancel buttons, Ctrl+Enter) can drive it; onExecutingChange(bool)
-// reports when a run starts and ends. onRun is wired to the editor's Ctrl+Enter.
+// (Run / Cancel buttons, Ctrl+Enter) can drive it; onExecutingChange reports
+// false | 'running' | 'cancelling'. onRun is wired to the editor's Ctrl+Enter.
+//
+// Cancel sends the run's cancel token to /api/query/cancel, then keeps reading
+// the stream: a statement coming back with status 'cancelled' confirms that the
+// database stopped it. Without confirmation within CANCEL_CONFIRM_MS the request
+// is abandoned and the UI says the query may still be running on the server.
 //
 // results: null
 //        | { sets: [{ statement, status, columns, rows, rowCount, command, duration, error? }], duration }
-//        | { cancelled: true }
+//        | { cancelled: true, unconfirmed?: true }
 //        | { error }   — the request itself failed (auth, connection, …)
 const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onRun }, ref) {
   const [query, setQuery]         = useState('')
@@ -159,7 +202,8 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   const [activeTab, setActiveTab] = useState('editor') // 'editor' | 'results'
   const [copiedKey, setCopiedKey] = useState(null)     // transient "Copied" feedback per result set
   const editorRef  = useRef(null)
-  const abortRef   = useRef(null)  // AbortController of the run in flight
+  const [cancelling, setCancelling] = useState(false)
+  const runRef     = useRef(null)  // { ac, token, cancelRequested, timer } of the run in flight
   const runningRef = useRef(false) // synchronous guard: state updates land too late to stop a double run
 
   useEffect(() => {
@@ -168,14 +212,40 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     return () => clearTimeout(t)
   }, [copiedKey])
 
-  // closing the pane mid-run cancels the request (the backend then closes its connection)
-  useEffect(() => () => abortRef.current?.abort(), [])
+  const sendCancel = (run) => {
+    api.post('/query/cancel', { token: run.token })
+      .then(res => addLog(res.data.sent ? 'info' : 'warn', res.data.sent
+        ? 'Cancel request delivered to the database server — waiting for confirmation…'
+        : 'Cancel request could not be delivered to the database server.'))
+      .catch(err => addLog('warn', `Cancel request failed: ${err.response?.data?.error || err.message}`))
+  }
+
+  const requestCancel = (run) => {
+    if (!run || run.cancelRequested) return
+    run.cancelRequested = true
+    setCancelling(true)
+    onExecutingChange?.('cancelling')
+    addLog('info', 'Cancelling query…')
+    if (run.token) sendCancel(run)
+    else if (run.started) run.ac.abort() // server can't issue cancel tokens — drop the request
+    // otherwise the token is sent as soon as the server reports the run started
+    run.timer = setTimeout(() => run.ac.abort(), CANCEL_CONFIRM_MS)
+  }
+
+  // closing the pane mid-run cancels it
+  useEffect(() => () => {
+    const run = runRef.current
+    if (!run) return
+    if (run.token) api.post('/query/cancel', { token: run.token }).catch(() => {})
+    run.ac.abort()
+  }, [])
 
   const setRunning = (running) => {
     runningRef.current = running
     setExecuting(running)
+    setCancelling(false)
     setStartedAt(running ? Date.now() : null)
-    onExecutingChange?.(running)
+    onExecutingChange?.(running ? 'running' : false)
   }
 
   const logOutcome = (sets) => {
@@ -183,6 +253,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
       const tag = sets.length > 1 ? `Query ${i + 1}` : 'Query'
       if (set.status === 'success') addLog('info', `${tag} succeeded: ${describeSet(set)}.`)
       else if (set.status === 'error') addLog('error', `${tag} failed: ${set.error}`)
+      else if (set.status === 'cancelled') addLog('warn', `${tag} cancelled on the server: ${set.error}`)
       else addLog('warn', `${tag} ${set.error}`)
     })
   }
@@ -194,34 +265,53 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
       const statements = plan.statements.map(s => s.text)
       if (!statements.length) { addLog('warn', 'Query is empty.'); return }
 
-      const ac = new AbortController()
-      abortRef.current = ac
+      const run = { ac: new AbortController(), token: null, started: false, cancelRequested: false, timer: 0 }
+      runRef.current = run
       setRunning(true)
       addLog('info', statements.length === 1
         ? `Executing: ${preview(statements[0])}`
         : `Executing ${statements.length} selected statements sequentially…`)
+      let done = null
       try {
-        const res = await api.post(endpoint, { ...payload, queries: statements }, { signal: ac.signal })
-        const sets = res.data.results || []
-        setResults({ sets, duration: res.data.duration })
+        await streamQuery(endpoint, { ...payload, queries: statements }, run.ac.signal, (msg) => {
+          if (msg.type === 'started') {
+            run.started = true
+            run.token = msg.cancelToken
+            if (run.cancelRequested) {
+              if (run.token) sendCancel(run)
+              else run.ac.abort()
+            }
+          } else if (msg.type === 'done') {
+            done = msg
+          } else if (msg.type === 'error') {
+            throw new Error(msg.error)
+          }
+        })
+        if (!done) throw new Error('The server closed the connection before the query finished.')
+        const sets = done.results || []
+        setResults({ sets, duration: done.duration })
         setActiveTab('results')
         logOutcome(sets)
+        if (run.cancelRequested && !sets.some(s => s.status === 'cancelled')) {
+          addLog('warn', 'The query finished before the cancel took effect.')
+        }
       } catch (err) {
-        if (err.code === 'ERR_CANCELED') {
-          setResults({ cancelled: true })
+        if (err.name === 'AbortError') {
+          if (!run.cancelRequested) return // pane closed
+          setResults({ cancelled: true, unconfirmed: true })
           setActiveTab('results')
-          addLog('warn', 'Query cancelled — execution stopped and the database connection was closed.')
+          addLog('warn', `Cancel not confirmed by the server within ${CANCEL_CONFIRM_MS / 1000}s — the query may still be running in Query Service (check Queries > Logs).`)
         } else {
-          const msg = err.response?.data?.error || err.message
-          setResults({ error: msg })
-          addLog('error', `Query failed: ${msg}`)
+          setResults({ error: err.message })
+          addLog('error', `Query failed: ${err.message}`)
         }
       } finally {
-        if (abortRef.current === ac) abortRef.current = null
+        clearTimeout(run.timer)
+        if (runRef.current === run) runRef.current = null
         setRunning(false)
       }
     },
-    cancel: () => abortRef.current?.abort(),
+    cancel: () => requestCancel(runRef.current),
   }))
 
   const handleCopy = (set, key) => {
@@ -235,7 +325,7 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
   }
 
   const sets      = results?.sets
-  const failed    = sets ? sets.filter(s => s.status !== 'success').length : 0
+  const failed    = sets ? sets.filter(s => s.status === 'error').length : 0
   const badgeText = sets && (sets.length === 1 ? (sets[0].rows?.length ?? 0) : `${sets.length} sets`)
 
   return (
@@ -316,16 +406,18 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
               <div role="status" className="flex-1 flex flex-col items-center justify-center gap-3">
                 <LoaderCircle size={32} strokeWidth={2} className="animate-spin text-blue-600" />
                 <p className="text-sm text-slate-500">Executing query, please wait… <Elapsed since={startedAt} /></p>
-                <Btn variant="danger" size="sm" icon={Square} iconClassName="fill-current" onClick={() => abortRef.current?.abort()}>
-                  Cancel query
+                <Btn variant="danger" size="sm" icon={Square} iconClassName="fill-current" loading={cancelling} onClick={() => requestCancel(runRef.current)}>
+                  {cancelling ? 'Cancelling…' : 'Cancel query'}
                 </Btn>
               </div>
             ) : !results ? (
               <EmptyState title="No results yet" text="Execute a query to see data here." icon={Table2} />
             ) : results.cancelled ? (
               <EmptyState
-                title="Query cancelled"
-                text="Execution was stopped and the database connection was closed."
+                title={results.unconfirmed ? 'Cancel not confirmed' : 'Query cancelled'}
+                text={results.unconfirmed
+                  ? 'The server did not confirm the cancel — the query may still be running in Query Service.'
+                  : 'Execution was stopped and the database connection was closed.'}
                 icon={OctagonX}
                 tone="warn"
               />
@@ -380,7 +472,8 @@ function Elapsed({ since }) {
 const STATUS_CHIP = {
   success: { label: 'Success', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   error:   { label: 'Failed',  cls: 'bg-rose-50 text-rose-700 border-rose-200' },
-  skipped: { label: 'Skipped', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  skipped:   { label: 'Skipped',   cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  cancelled: { label: 'Cancelled', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
 }
 
 /**
@@ -439,8 +532,10 @@ function ResultSet({ set, title, multi = false, copied, onCopy }) {
       )}
       {!ok && (
         <ErrorPanel
-          tone={set.status === 'skipped' ? 'warn' : 'error'}
-          title={set.status === 'skipped' ? 'Not executed' : where ? `Failed at line ${where.line}, column ${where.col}` : 'Statement failed'}
+          tone={set.status === 'error' ? 'error' : 'warn'}
+          title={set.status === 'skipped' ? 'Not executed'
+            : set.status === 'cancelled' ? 'Cancelled on the server'
+            : where ? `Failed at line ${where.line}, column ${where.col}` : 'Statement failed'}
           message={set.error}
           hint={set.hint}
         />
