@@ -526,40 +526,60 @@ const QS_TERMINAL_STATES = new Set(['SUCCESS', 'FAILED', 'KILLED', 'CANCELLED', 
 const QS_CLOCK_SKEW_MS = 60 * 1000
 const normalizeSql = (sql) => String(sql || '').replace(/\s+/g, ' ').replace(/[\s;]+$/, '').trim()
 
+// A query from a Postgres client shows up in GET /queries a few seconds after
+// it starts (or only once it ends), so the lookup is retried.
+const QS_LOOKUP_ATTEMPTS = 7
+const QS_LOOKUP_INTERVAL_MS = 1500
+// A finished entry counts as "this run" only if created this close to its start.
+const QS_SAME_RUN_MS = 10 * 1000
+
 /**
  * Cancel a statement through the Query Service API (PATCH /queries/{id}
  * { op: 'cancel' }). Query Service does not act on the Postgres CancelRequest,
- * and the API has no SQL filter, so recent queries are listed and the newest
- * unfinished one whose SQL matches the running statement is cancelled.
- * Returns diagnostics: { cancelled, queryId?, state?, scanned, error?, recent? }.
+ * and the API has no SQL filter, so recent queries (including hidden ones) are
+ * listed and the newest one whose SQL matches the running statement is used:
+ *   unfinished → cancelled; finished → nothing to cancel; absent → retry.
+ * Returns diagnostics: { cancelled, queryId?, state?, finished?, attempts, scanned, recent? }.
  */
-async function cancelViaQueryApi(creds, sandbox, statement, startedAt) {
+async function cancelViaQueryApi(creds, sandbox, statement, startedAt, isAborted) {
   const token = await getAccessToken(creds)
   const headers = { Accept: 'application/json', ...aepHeaders({ token, API_KEY: creds.API_KEY, IMS_ORG: creds.IMS_ORG, SANDBOX_NAME: sandbox }) }
-  const since = new Date((Number(startedAt) || Date.now()) - QS_CLOCK_SKEW_MS).toISOString()
-  const list = await axios.get('https://platform.adobe.io/data/foundation/query/queries', {
-    headers,
-    // excludeHidden=false: queries from Postgres clients may be classed as
-    // "non-user driven" and are hidden from the default listing
-    params: { orderby: '-created', limit: 50, property: `created>=${since}`, excludeHidden: false },
-  })
-  const queries = Array.isArray(list.data?.queries) ? list.data.queries : []
+  const start = Number(startedAt) || Date.now()
+  const since = new Date(start - QS_CLOCK_SKEW_MS).toISOString()
   const target = normalizeSql(statement).toLowerCase()
-  const match = queries.find(q => !QS_TERMINAL_STATES.has(String(q.state).toUpperCase()) && normalizeSql(q.request?.sql).toLowerCase() === target)
-  if (!match) {
-    return {
-      cancelled: false,
-      scanned: queries.length,
-      // what the API did return, to show why nothing matched
-      recent: queries.slice(0, 5).map(q => ({ state: q.state, client: q.client, sql: normalizeSql(q.request?.sql).slice(0, 80) })),
+  let queries = []
+  for (let attempt = 1; attempt <= QS_LOOKUP_ATTEMPTS; attempt++) {
+    if (attempt > 1) await new Promise(r => setTimeout(r, QS_LOOKUP_INTERVAL_MS))
+    if (isAborted()) break
+    const list = await axios.get('https://platform.adobe.io/data/foundation/query/queries', {
+      headers,
+      // excludeHidden=false: queries from Postgres clients count as "non-user
+      // driven" and are hidden from the default listing
+      params: { orderby: '-created', limit: 50, property: `created>=${since}`, excludeHidden: false },
+    })
+    queries = Array.isArray(list.data?.queries) ? list.data.queries : []
+    const sameSql = queries.filter(q => normalizeSql(q.request?.sql).toLowerCase() === target)
+    const running = sameSql.find(q => !QS_TERMINAL_STATES.has(String(q.state).toUpperCase()))
+    if (running) {
+      await axios.patch(
+        `https://platform.adobe.io/data/foundation/query/queries/${encodeURIComponent(running.id)}`,
+        { op: 'cancel' },
+        { headers: { ...headers, 'Content-Type': 'application/json' } }
+      )
+      return { cancelled: true, queryId: running.id, state: running.state, attempts: attempt, scanned: queries.length }
+    }
+    const finished = sameSql.find(q => Date.parse(q.created) >= start - QS_SAME_RUN_MS)
+    if (finished) {
+      return { cancelled: false, finished: true, queryId: finished.id, state: finished.state, attempts: attempt, scanned: queries.length }
     }
   }
-  await axios.patch(
-    `https://platform.adobe.io/data/foundation/query/queries/${encodeURIComponent(match.id)}`,
-    { op: 'cancel' },
-    { headers: { ...headers, 'Content-Type': 'application/json' } }
-  )
-  return { cancelled: true, queryId: match.id, state: match.state, scanned: queries.length }
+  return {
+    cancelled: false,
+    attempts: QS_LOOKUP_ATTEMPTS,
+    scanned: queries.length,
+    // what the API did return, to show why nothing matched
+    recent: queries.slice(0, 5).map(q => ({ state: q.state, client: q.client, sql: normalizeSql(q.request?.sql).slice(0, 80) })),
+  }
 }
 
 /**
@@ -586,7 +606,9 @@ app.post('/api/query/cancel', async (req, res) => {
     const session = readSession(req)
     if (!session || session.c.IMS_ORG !== t.org) return { cancelled: false, error: 'No matching credential session.' }
     try {
-      return await cancelViaQueryApi(session.c, t.sandbox, statement, startedAt)
+      let gone = false
+      res.on('close', () => { gone = true })
+      return await cancelViaQueryApi(session.c, t.sandbox, statement, startedAt, () => gone)
     } catch (err) {
       return { cancelled: false, error: err.response?.data?.title || err.response?.data?.message || err.message, status: err.response?.status }
     }

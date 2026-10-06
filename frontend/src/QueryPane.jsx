@@ -235,10 +235,12 @@ const QueryPane = forwardRef(function QueryPane({ addLog, onExecutingChange, onR
     if (!r) return // Direct mode: no Query Service API credentials
     if (r.cancelled) {
       addLog('info', `Query Service API: cancel issued for query ${r.queryId} (was ${r.state}) — waiting for confirmation…`)
+    } else if (r.finished) {
+      addLog('warn', `Query Service API: query ${r.queryId} had already finished (${r.state}) — nothing left to cancel.`)
     } else if (r.error) {
       addLog('warn', `Query Service API cancel failed${r.status ? ` (HTTP ${r.status})` : ''}: ${r.error}`)
     } else {
-      addLog('warn', `Query Service API: no unfinished query with this SQL among ${r.scanned} recent queries.`)
+      addLog('warn', `Query Service API: query not found after ${r.attempts} lookups (${r.scanned} recent queries).`)
       ;(r.recent || []).forEach(q => addLog('info', `  recent: [${q.state}] [${q.client || '—'}] ${q.sql}`))
     }
   }
